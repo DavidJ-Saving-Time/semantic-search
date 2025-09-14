@@ -129,6 +129,7 @@ let panStart = { x: 0, y: 0, scrollX: 0, scrollY: 0 };
 
   updateHeaderOffset();
 
+
   function updateContainerSize() {
     const outer = pageWrap.parentElement;
     const nw = img.naturalWidth;
@@ -139,6 +140,7 @@ let panStart = { x: 0, y: 0, scrollX: 0, scrollY: 0 };
     outer.style.width = `${nw * zoom}px`;
     outer.style.height = `${nh * zoom}px`;
   }
+
 
   function setZoom(z) {
     const min = 0.5, max = 3.0;
