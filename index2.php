@@ -1,0 +1,680 @@
+
+
+<?php
+
+// index.php — Semantic search (inferred topics only) for web (Apache + PHP)
+// - Uses OpenAI embeddings (from env OPENAI_API_KEY)
+// - Postgres via PDO (PGHOST, PGPORT, PGDATABASE, PGUSER, PGPASSWORD)
+// - Bootstrap 5 UI
+// - Optional query embedding cache (table DDL below)
+// No CSRF/rate limiting (local dev as requested).
+
+
+ini_set('display_errors', '0'); // keep UI clean; inspect server logs for details
+setlocale(LC_NUMERIC, 'C');     // ensure "." decimal separator for floats
+
+// -------------------------- Config (env) --------------------------
+$OPENAI_API_KEY = getenv('OPENAI_API_KEY') ?: '';
+$PGHOST = getenv('PGHOST') ?: 'localhost';
+$PGPORT = getenv('PGPORT') ?: '5432';
+$PGDATABASE = getenv('PGDATABASE') ?: 'journals';
+$PGUSER = getenv('PGUSER') ?: 'journal_user';
+$PGPASSWORD = getenv('PGPASSWORD') ?: '';
+$OPENAI_MODEL = getenv('OPENAI_EMBED_MODEL') ?: 'text-embedding-3-large';
+
+// Optional timeouts (env)
+$OPENAI_TIMEOUT = (int)(getenv('OPENAI_TIMEOUT_SECS') ?: 8);
+$PG_STMT_TIMEOUT = (int)(getenv('PG_STATEMENT_TIMEOUT_MS') ?: 0);
+
+// Server-side defaults (you can surface later in UI)
+$DEF_LIMIT  = 10;
+$DEF_W_SIM  = 0.9;
+$DEF_W_TOP  = 0.1;
+$DEF_THRESH = 0.35;
+$DEF_K      = 3;
+
+// -------------------------- Helpers --------------------------
+function h(?string $s): string
+{
+    return htmlspecialchars($s ?? '', ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
+}
+
+function clamp_int($v, int $min, int $max, int $fallback): int
+{
+    if (!is_numeric($v)) {
+        return $fallback;
+    }
+    $vi = (int)$v;
+    return max($min, min($max, $vi));
+}
+
+function normalize_query_key(string $q): string
+{
+    $q = strtolower(trim($q));
+    $q = preg_replace('/\s+/u', ' ', $q);
+    return $q;
+}
+
+function vector_literal(array $floats): string
+{
+    // avoid scientific notation; implode raw strings
+    $out = [];
+    foreach ($floats as $f) {
+        // cast to float then format without thousands sep, with dot decimal
+        $out[] = rtrim(rtrim(number_format((float)$f, 8, '.', ''), '0'), '.'); // trim trailing zeros
+    }
+    return '[' . implode(',', $out) . ']';
+}
+
+// -------------------------- OpenAI Embeddings --------------------------
+function openai_embed(string $apiKey, string $text, string $model, int $timeoutSec = 8): array
+{
+    $payload = json_encode(['input' => $text, 'model' => $model], JSON_UNESCAPED_UNICODE);
+    $ch = curl_init('https://api.openai.com/v1/embeddings');
+    curl_setopt_array($ch, [
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_POST => true,
+        CURLOPT_HTTPHEADER => [
+            'Content-Type: application/json',
+            'Authorization: Bearer ' . $apiKey
+        ],
+        CURLOPT_POSTFIELDS => $payload,
+        CURLOPT_CONNECTTIMEOUT => 2,
+        CURLOPT_TIMEOUT => max(2, $timeoutSec),
+    ]);
+    $resp = curl_exec($ch);
+    $http = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    $err  = curl_error($ch);
+    curl_close($ch);
+
+    if ($resp === false || $http < 200 || $http >= 300) {
+        throw new RuntimeException('Embedding request failed: HTTP ' . $http . ($err ? " ($err)" : ''));
+    }
+    $j = json_decode($resp, true);
+    if (!is_array($j) || !isset($j['data'][0]['embedding'])) {
+        throw new RuntimeException('Invalid embedding response');
+    }
+    return $j['data'][0]['embedding'];
+}
+
+// -------------------------- Postgres --------------------------
+function pg_pdo(string $host, string $port, string $db, string $user, string $pass, int $stmtTimeoutMs): PDO
+{
+    $app = "semantic_search_web";
+    $dsn = "pgsql:host={$host};port={$port};dbname={$db};options='--application_name={$app}'";
+    $pdo = new PDO($dsn, $user, $pass, [
+        PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
+        PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
+        PDO::ATTR_EMULATE_PREPARES => false,
+        PDO::ATTR_PERSISTENT => false,
+    ]);
+
+    error_log("[semantic_search] stmt_timeout=" . $pdo->query("SHOW statement_timeout")->fetchColumn());
+    $t = microtime(true);
+    $pdo->query("SELECT 1")->fetchColumn();
+    error_log("[semantic_search] select1_ms=" . (int)round((microtime(true) - $t) * 1000));
+
+    $pdo->exec("SET jit = off");
+
+    return $pdo;
+}
+
+// Returns cached vector or null. Swallows missing-table errors.
+function cache_get(PDO $pdo, string $qkey): ?array
+{
+    try {
+        $st = $pdo->prepare("SELECT emb FROM query_cache WHERE query_key = :qkey");
+        $st->execute([':qkey' => $qkey]);
+        $row = $st->fetch();
+        if ($row && isset($row['emb']) && is_string($row['emb'])) {
+            // emb stored as text[]? We’ll store as JSON text for safety.
+            $arr = json_decode($row['emb'], true);
+            if (is_array($arr)) {
+                return $arr;
+            }
+        }
+    } catch (Throwable $e) { /* ignore for local dev */
+    }
+    return null;
+}
+
+function cache_put(PDO $pdo, string $qkey, array $embedding): void
+{
+    try {
+        $st = $pdo->prepare("INSERT INTO query_cache(query_key, emb, created_at) VALUES (:qkey, :emb, NOW())
+                             ON CONFLICT (query_key) DO UPDATE SET emb = EXCLUDED.emb, created_at = NOW()");
+        $st->execute([':qkey' => $qkey, ':emb' => json_encode($embedding)]);
+    } catch (Throwable $e) { /* ignore for local dev */
+    }
+}
+
+$selectedPub = isset($_POST['pubname']) ? trim($_POST['pubname']) : '';
+
+$pdo = pg_pdo($PGHOST, $PGPORT, $PGDATABASE, $PGUSER, $PGPASSWORD, 5000); // 5s timeout example
+
+$stmt = $pdo->query("
+    SELECT DISTINCT pubname
+    FROM docs
+    WHERE pubname IS NOT NULL AND pubname <> ''
+    ORDER BY pubname
+");
+$pubnames = $stmt->fetchAll(PDO::FETCH_COLUMN);
+
+
+$sqlCounts = "
+  SELECT pubname AS k, COUNT(*)::int AS cnt
+  FROM docs
+  WHERE pubname IS NOT NULL AND pubname <> ''
+  GROUP BY pubname
+";
+$counts = [];
+$total  = 0;
+foreach ($pdo->query($sqlCounts, PDO::FETCH_ASSOC) as $r) {
+    $counts[$r['k']] = (int)$r['cnt'];
+    $total += (int)$r['cnt'];
+}
+
+
+
+
+// -------------------------- Request handling --------------------------
+$q         = '';
+$limit     = $DEF_LIMIT;
+$w_sim     = $DEF_W_SIM;
+$w_topic   = $DEF_W_TOP;
+$thresh    = $DEF_THRESH;
+$k         = $DEF_K;
+$results   = [];
+$errorMsg  = '';
+$timing    = ['embed_ms' => null, 'sql_ms' => null, 'cache' => 'miss'];
+
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+
+
+    $q = isset($_POST['q']) ? (string)$_POST['q'] : '';
+    $limit = clamp_int($_POST['limit'] ?? $DEF_LIMIT, 1, 50, $DEF_LIMIT);
+
+    // Server-fixed knobs (hide UI for now; you can expose later)
+    $w_sim   = $DEF_W_SIM;
+    $w_topic = $DEF_W_TOP;
+    $thresh  = $DEF_THRESH;
+    $k       = $DEF_K;
+
+    $q = trim($q);
+    if ($q === '' || mb_strlen($q) > 512) {
+        $errorMsg = 'Please enter a query (max 512 characters).';
+    } elseif ($OPENAI_API_KEY === '') {
+        $errorMsg = 'OPENAI_API_KEY is not configured.';
+    } else {
+        try {
+            $pdo = pg_pdo($PGHOST, $PGPORT, $PGDATABASE, $PGUSER, $PGPASSWORD, $PG_STMT_TIMEOUT);
+
+            // cache
+            $qkey = normalize_query_key($q);
+            $emb = cache_get($pdo, $qkey);
+            if ($emb !== null) {
+                $timing['cache'] = 'hit';
+            } else {
+                $t0 = microtime(true);
+                $emb = openai_embed($OPENAI_API_KEY, $q, $OPENAI_MODEL, $OPENAI_TIMEOUT);
+                $timing['embed_ms'] = (int)round((microtime(true) - $t0) * 1000);
+                cache_put($pdo, $qkey, $emb);
+            }
+
+            // Build vector literal
+            // Build the vector literal (same as before)
+            $vec = vector_literal($emb); // "[0.12,0.34,...]"
+
+            // Use native pgsql just for this query
+            $pgconn = pg_connect(sprintf(
+                "host=%s port=%s dbname=%s user=%s%s",
+                $PGHOST,
+                $PGPORT,
+                $PGDATABASE,
+                $PGUSER,
+                ($PGPASSWORD !== '' ? " password={$PGPASSWORD}" : "")
+            ));
+            if ($pgconn === false) {
+                throw new RuntimeException('pg_connect failed: ' . pg_last_error());
+            }
+
+            pg_query($pgconn, "SET jit = off");
+            pg_query($pgconn, "SET statement_timeout = 0");
+            pg_query($pgconn, 'SET enable_sort = off');
+            //pg_query($pgconn, 'SET hnsw.ef_search = 80');
+
+            // PHP params order (leave as-is):
+            // [$vec, $w_sim, $w_topic, $thresh, $k, $limit]
+            $sql_pg = <<<SQL
+WITH params AS (
+  SELECT
+    $1::vector AS v,
+    $2::float  AS w_sem,
+    $3::float  AS w_topic,
+    $4::float  AS thresh,
+    $5::int    AS k
+),
+topic_candidates AS (
+  SELECT tl.topic,
+         1 - (tl.emb_hv <=> ($1::halfvec(3072))) AS sim
+  FROM topic_labels AS tl
+  WHERE tl.emb_hv IS NOT NULL
+  ORDER BY tl.emb_hv <=> ($1::halfvec(3072))
+  LIMIT (SELECT k FROM params)
+),
+inferred AS (
+  SELECT topic, GREATEST(sim - (SELECT thresh FROM params), 0) AS weight
+  FROM topic_candidates
+  WHERE sim >= (SELECT thresh FROM params)
+),
+doc_candidates AS (
+  SELECT d.id
+  FROM docs d
+  WHERE d.embedding_hv IS NOT NULL
+    AND (d.meta->'topics' IS NULL OR jsonb_typeof(d.meta->'topics')='array')
+    AND ($7::text IS NULL OR d.pubname = $7::text)
+  ORDER BY d.embedding_hv <=> ($1::halfvec(3072))
+  LIMIT GREATEST((SELECT k FROM params), $6 * 10)
+),
+scored AS (
+  SELECT d.id, d.source_file, d.summary_clean,
+         1 - (d.embedding <=> (SELECT v FROM params)) AS sim,
+
+         -- raw topic signals (for display)
+         COALESCE((
+           SELECT AVG(i.weight)
+           FROM inferred i
+           JOIN LATERAL jsonb_array_elements_text(d.meta->'topics') x(topic) ON true
+           WHERE lower(x.topic) = lower(i.topic)
+         ), 0) AS topic_display,
+
+         -- clipped for scoring (unchanged behavior)
+         COALESCE(LEAST((
+           SELECT SUM(i.weight)
+           FROM inferred i
+           JOIN LATERAL jsonb_array_elements_text(d.meta->'topics') x(topic) ON true
+           WHERE lower(x.topic) = lower(i.topic)
+         ), 1), 0) AS topic_boost
+  FROM docs d
+  JOIN doc_candidates dc ON dc.id = d.id
+)
+SELECT s.id,
+       s.source_file,
+       left(s.summary_clean,1500) AS snippet,
+       s.sim,
+       s.topic_display,
+       s.topic_boost,
+       (SELECT w_sem FROM params)*s.sim + (SELECT w_topic FROM params)*s.topic_boost AS final_score,
+       d.meta->>'issue' AS issue,
+       d.meta->>'title' AS title,
+       (d.meta->>'first_page')::int AS first_page
+FROM scored s
+JOIN docs d ON d.id = s.id
+ORDER BY final_score DESC
+LIMIT $6;
+SQL;
+
+            $t0 = microtime(true);
+            $pubnameParam = ($selectedPub === '') ? null : $selectedPub;
+            $params = [$vec, $w_sim, $w_topic, $thresh, $k, $limit, $pubnameParam];
+            $res = pg_query_params($pgconn, $sql_pg, $params);
+
+
+
+            if ($res === false) {
+                throw new RuntimeException('pg_query_params failed: ' . pg_last_error($pgconn));
+            }
+            $results = pg_fetch_all($res) ?: [];
+            $timing['sql_ms'] = (int)round((microtime(true) - $t0) * 1000);
+
+            pg_close($pgconn);
+
+
+
+
+        } catch (Throwable $e) {
+            $errorMsg = 'Search failed. See server logs.';
+            error_log('[semantic_search] ' . $e->getMessage());
+        }
+    }
+}
+
+
+function english_title_case($str)
+{
+    // Words that should stay lowercase unless first/last
+    $smallWords = [
+        'a','an','and','as','at','but','by','for','in','nor',
+        'of','on','or','per','the','to','vs','via'
+    ];
+
+    $words = preg_split('/\s+/', strtolower($str));
+    $lastIndex = count($words) - 1;
+
+    foreach ($words as $i => &$word) {
+        if ($i === 0 || $i === $lastIndex || !in_array($word, $smallWords)) {
+            $word = ucfirst($word);
+        }
+    }
+
+    return implode(' ', $words);
+}
+
+
+$venvPy = '/srv/http/calibre-nilla/reranker/.venv/bin/python';
+$cli    = '/srv/http/calibre-nilla/reranker/rerank_cli.py';
+
+
+$docs = array_map(
+    fn ($r) => [
+    'id'   => (string)$r['id'],
+    'text' => mb_substr(($r['title'] ?? '') . ' — ' . ($r['snippet'] ?? ''), 0, 1200),
+  ],
+    $results
+);
+
+
+$payload = json_encode(['query' => $q, 'documents' => $docs], JSON_UNESCAPED_UNICODE);
+
+$descs = [['pipe','r'], ['pipe','w'], ['pipe','w']];
+$env = ['OMP_NUM_THREADS' => '1', 'MKL_NUM_THREADS' => '1'];
+$proc = proc_open($venvPy.' '.escapeshellarg($cli), $descs, $pipes, null, $env);
+fwrite($pipes[0], $payload);
+fclose($pipes[0]);
+$out = stream_get_contents($pipes[1]);
+fclose($pipes[1]);
+$err = stream_get_contents($pipes[2]);
+fclose($pipes[2]);
+proc_close($proc);
+
+$j = json_decode($out, true);
+$scores = [];
+foreach (($j['scores'] ?? []) as $s) {
+    $scores[$s['id']] = $s['score'];
+}
+
+// sort by rerank score (desc), tie-break by your original final score
+usort($results, function ($a, $b) use ($scores) {
+    $sa = $scores[$a['id']] ?? -INF;
+    $sb = $scores[$b['id']] ?? -INF;
+    if ($sa === $sb) {
+        return ($b['final_score'] ?? 0) <=> ($a['final_score'] ?? 0);
+    }
+    return $sb <=> $sa;
+});
+
+?>
+
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Semantic Search</title>
+
+  <!-- Bootstrap 5.3 -->
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+
+  <!-- Font Awesome 6 -->
+  <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css" rel="stylesheet">
+
+  <style>
+    body { padding-top: 2rem; }
+    .score-badge { font-variant-numeric: tabular-nums; }
+    .snippet { white-space: pre-wrap; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header class="mb-4 d-flex align-items-center gap-2">
+      <i class="fa-solid fa-magnifying-glass fa-lg text-primary" aria-hidden="true"></i>
+      <h1 class="mb-0">Semantic Search</h1>
+    </header>
+
+    <form method="post" class="mb-4" action="">
+  <div class="row g-2 align-items-end">
+    <!-- Query -->
+    <div class="col-12 col-md-6">
+      <label for="q" class="form-label">Query</label>
+      <input
+        type="text"
+        class="form-control"
+        id="q"
+        name="q"
+        maxlength="512"
+        required
+        value="<?= h($q) ?>"
+        placeholder="Type your search query...">
+    </div>
+
+    <!-- Publication -->
+    <div class="col-12 col-md-4">
+    <label for="pubname" class="form-label">Publication</label>
+<select name="pubname" id="pubname" class="form-select">
+  <option value="" <?= $selectedPub === '' ? 'selected' : '' ?>>
+    All (<?= number_format($total) ?>)
+  </option>
+  <?php foreach ($pubnames as $p): ?>
+    <?php $cnt = $counts[$p] ?? 0; ?>
+    <option value="<?= h($p) ?>" <?= strcasecmp($selectedPub, $p) === 0 ? 'selected' : '' ?>>
+      <?= h($p) ?> (<?= number_format($cnt) ?>)
+    </option>
+  <?php endforeach; ?>
+</select>
+    </div>
+
+    <!-- Results -->
+    <div class="col-6 col-md-1">
+      <label for="limit" class="form-label">Results</label>
+      <input
+        type="number"
+        min="1"
+        max="50"
+        class="form-control"
+        id="limit"
+        name="limit"
+        value="<?= h((string)$limit) ?>">
+    </div>
+
+    <!-- Submit -->
+    <div class="col-6 col-md-1 d-grid">
+      <button type="submit" class="btn btn-primary">
+        <i class="fa-solid fa-search me-1" aria-hidden="true"></i>
+        Search
+      </button>
+    </div>
+  </div>
+
+  <div class="form-text mt-2">
+    Using inferred topics only. Weights:
+    w<sub>sim</sub>=<?=$w_sim?>, w<sub>topic</sub>=<?=$w_topic?>, thresh=<?=$thresh?>, k=<?=$k?>.
+    <?php if ($timing['embed_ms'] !== null || $timing['sql_ms'] !== null): ?>
+      <span class="ms-2 badge text-bg-secondary">
+        <i class="fa-solid fa-rotate me-1" aria-hidden="true"></i>cache: <?=$timing['cache']?>
+      </span>
+      <?php if ($timing['embed_ms'] !== null): ?>
+        <span class="ms-1 badge text-bg-secondary">
+          <i class="fa-solid fa-microchip me-1" aria-hidden="true"></i>embed: <?=$timing['embed_ms']?>ms
+        </span>
+      <?php endif; ?>
+      <?php if ($timing['sql_ms'] !== null): ?>
+        <span class="ms-1 badge text-bg-secondary">
+          <i class="fa-solid fa-database me-1" aria-hidden="true"></i>sql: <?=$timing['sql_ms']?>ms
+        </span>
+      <?php endif; ?>
+    <?php endif; ?>
+  </div>
+</form>
+
+    <?php if ($errorMsg): ?>
+      <div class="alert alert-danger" role="alert">
+        <i class="fa-solid fa-triangle-exclamation me-1" aria-hidden="true"></i><?=h($errorMsg)?>
+      </div>
+    <?php endif; ?>
+
+    <?php if ($_SERVER['REQUEST_METHOD'] === 'POST' && !$errorMsg): ?>
+      <?php if (!$results): ?>
+        <div class="alert alert-warning" role="alert">
+          <i class="fa-regular fa-face-frown me-1" aria-hidden="true"></i>No results (maybe no embeddings yet).
+        </div>
+      <?php else: ?>
+        <ol class="list-group list-group-numbered">
+          <?php foreach ($results as $row): ?>
+            <li class="list-group-item">
+              <div class="d-flex justify-content-between align-items-start gap-3">
+                <div class="flex-grow-1">
+                  <div class="mb-1">
+                    <?=h($row['issue'] ?? '')?>
+                    <div class="btn-group btn-group-sm ms-2" role="group" aria-label="Result links">
+                      <a class="btn btn-outline-secondary" target="_blank" rel="noopener" href="/EWJ_issues/<?=h($row['issue'] ?? '')?>.pdf#page=<?=h($row['first_page'] ?? '')?>">
+                        <i class="fa-solid fa-up-right-from-square me-1" aria-hidden="true"></i>Source
+                      </a>
+                      <a class="btn btn-outline-secondary js-view-md" target="_blank" rel="noopener" href="/EWJ_issues/<?=h($row['issue'] ?? '')?>.md">
+                        <i class="fa-regular fa-file-lines me-1" aria-hidden="true"></i>Full Summary
+                      </a>
+                    </div>
+                    <span class="text-body-secondary small ms-2">ID: <?=h((string)$row['id'])?></span>
+                  </div>
+
+                  <h2 class="h5 mt-2 mb-1"><?=english_title_case($row['title']);?></h2>
+                  <div class="snippet"><?=h($row['snippet'] ?? '')?></div>
+                </div>
+
+                <div class="text-end">
+                  <div class="mb-1">
+                    <span class="badge text-bg-primary score-badge">
+                      <i class="fa-solid fa-star me-1" aria-hidden="true"></i>final <?=number_format((float)$row['final_score'], 4)?>
+                    </span>
+                  </div>
+                  <div class="mb-1">
+                    <span class="badge text-bg-light text-dark score-badge">
+                      <i class="fa-solid fa-wave-square me-1" aria-hidden="true"></i>sim <?=number_format((float)$row['sim'], 4)?>
+                    </span>
+                  </div>
+                  <div>
+                  <span class="badge text-bg-light text-dark score-badge">
+    <i class="fa-solid fa-layer-group me-1" aria-hidden="true"></i>
+    topic <?= number_format((float)($row['topic_display'] ?? $row['topic_boost'] ?? 0), 3) ?>
+  </span>
+                  </div>
+                </div>
+              </div>
+            </li>
+          <?php endforeach; ?>
+        </ol>
+      <?php endif; ?>
+    <?php endif; ?>
+
+    <hr class="my-4" />
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+  <!-- Markdown Modal -->
+  <div class="modal fade" id="mdModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-xl modal-dialog-scrollable">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h5 class="modal-title"><i class="fa-regular fa-file-lines me-2"></i><span id="mdModalTitle">Full Summary</span></h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+        </div>
+        <div class="modal-body">
+          <div id="mdLoading" class="d-flex align-items-center gap-2 mb-3" hidden>
+            <i class="fa-solid fa-spinner fa-spin"></i>
+            <span>Loading…</span>
+          </div>
+          <div id="mdError" class="alert alert-danger d-none" role="alert"></div>
+          <article id="mdContent" class="markdown-body"></article>
+        </div>
+        <div class="modal-footer">
+          <a id="mdOpenRaw" href="#" target="_blank" rel="noopener" class="btn btn-outline-secondary">
+            <i class="fa-solid fa-up-right-from-square me-1"></i>Open raw Markdown
+          </a>
+          <button type="button" class="btn btn-primary" data-bs-dismiss="modal">Close</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <footer class="bg-light text-center text-muted py-3 mt-5">
+  <div class="container">
+    <small>
+      <i class="fa-brands fa-creative-commons"></i>
+      <i class="fa-brands fa-creative-commons-zero"></i>
+      Text &amp; summaries created for this project are dedicated to the public domain under 
+      <a href="https://creativecommons.org/publicdomain/zero/1.0/" target="_blank" class="text-decoration-none">CC0</a>. 
+      Images sourced from the <a href="https://archive.org/" target="_blank" class="text-decoration-none">Internet Archive</a>; rights may apply.
+    </small>
+  </div>
+</footer>
+
+
+  <!-- Marked.js and DOMPurify for safe client-side rendering -->
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/dompurify@3.1.6/dist/purify.min.js"></script>
+
+
+
+  <script>
+(function() {
+    const modalEl = document.getElementById('mdModal');
+    const modal = new bootstrap.Modal(modalEl);
+    const contentEl = document.getElementById('mdContent');
+    const titleEl = document.getElementById('mdModalTitle');
+    const loadingEl = document.getElementById('mdLoading');
+    const errorEl = document.getElementById('mdError');
+    const rawLinkEl = document.getElementById('mdOpenRaw');
+
+
+    // Delegated click: open .js-view-md links in modal
+    document.addEventListener('click', function(evt) {
+        const link = evt.target.closest('a.js-view-md');
+        if (!link) return;
+        evt.preventDefault();
+
+
+        const url = link.getAttribute('href');
+        const fileName = url.split('/').pop();
+        titleEl.textContent = fileName || 'Full Summary';
+        rawLinkEl.href = url;
+
+
+        // reset UI state
+        contentEl.innerHTML = '';
+        errorEl.classList.add('d-none');
+        loadingEl.classList.remove('d-none');
+
+
+        modal.show();
+
+
+        fetch(url, {
+                cache: 'no-store'
+            })
+            .then(res => {
+                if (!res.ok) throw new Error('HTTP ' + res.status);
+                return res.text();
+            })
+            .then(md => {
+                const html = marked.parse(md, {
+                    mangle: false,
+                    headerIds: true,
+                    breaks: true
+                });
+                contentEl.innerHTML = DOMPurify.sanitize(html);
+            })
+            .catch(err => {
+                errorEl.textContent = 'Failed to load Markdown: ' + err.message;
+                errorEl.classList.remove('d-none');
+            })
+            .finally(() => {
+                loadingEl.classList.add('d-none');
+            });
+    });
+})();
+</script>
+
+
+
+</body>
+</html>
+

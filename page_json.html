@@ -1,0 +1,484 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Page Image + Text Overlay (JSON + Zoom)</title>
+  <style>
+    :root {
+      --accent: rgba(255, 200, 0, 0.35);
+      --accent-strong: rgba(255, 120, 0, 0.6);
+      --box: rgba(0, 120, 255, 0.18);
+      --box-border: rgba(0, 120, 255, 0.4);
+      --bg: #0b0f14;
+      --fg: #e6eef7;
+      --muted: #9ab;
+    }
+    html, body { height: 100%; margin: 0; background: var(--bg); color: var(--fg); font: 14px/1.4 system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, Noto Sans, "Helvetica Neue", Arial, "Apple Color Emoji", "Segoe UI Emoji"; }
+    header { display: flex; flex-wrap: wrap; gap: .75rem; align-items: center; padding: .75rem 1rem; position: sticky; top: 0; background: linear-gradient(to bottom, rgba(0,0,0,.65), rgba(0,0,0,.35), transparent); backdrop-filter: blur(6px); z-index: 10; }
+    header input[type="search"] { flex: 1 1 280px; padding: .6rem .75rem; border-radius: .6rem; border: 1px solid #334; background: #0f1621; color: var(--fg); }
+    header button, header label { padding: .55rem .8rem; border-radius: .6rem; border: 1px solid #334; background: #0f1621; color: var(--fg); cursor: pointer; display: inline-flex; align-items: center; gap: .4rem; }
+    header .meta { font-size: 12px; color: var(--muted); }
+    .zoom-wrap { display: inline-flex; align-items: center; gap: .5rem; padding: .4rem .6rem; border-radius: .6rem; border: 1px solid #334; background: #0f1621; }
+    .zoom-wrap input[type="range"] { width: 160px; }
+
+    .stage { display: grid; place-content: start center; padding: 1rem; }
+    .page-outer { position: relative; }
+    .page-wrap { position: relative; transform-origin: top left; }
+    .page-wrap img { width: 100%; height: auto; display: block; box-shadow: 0 10px 30px rgba(0,0,0,.45); border-radius: .5rem; }
+
+    .overlay { position: absolute; inset: 0; pointer-events: auto; }
+    .word { position: absolute; outline: 1px solid transparent; white-space: pre; background: transparent; user-select: text; color: transparent; -webkit-text-fill-color: transparent; caret-color: transparent; }
+    .word::selection { background: var(--accent); }
+    body.debug .word { outline-color: var(--box-border); background: var(--box); }
+    .word.hit { background: var(--accent); outline-color: var(--accent-strong); border-radius: 2px; }
+
+    .toast { position: fixed; right: 12px; bottom: 12px; background: rgba(20,28,38,.8); border: 1px solid #334; border-radius: .6rem; padding: .5rem .7rem; color: var(--muted); font-size: 12px; z-index: 20; }
+    .legend { color: var(--muted); font-size: 12px; margin-left: auto; }
+    a { color: #9fd; }
+  </style>
+</head>
+<body>
+  <header>
+    <input id="q" type="search" placeholder="Find: 'the bay,my house in'" autocomplete="off" />
+    <button id="btnFind" title="Find">Find</button>
+    <button id="btnClear" title="Clear">Clear</button>
+    <label id="lblDebug" title="Toggle debug outlines"><input id="chkDebug" type="checkbox" /> Debug</label>
+    <label id="lblOrigin" title="Toggle Y-origin (top-left vs bottom-left)"><input id="chkOrigin" type="checkbox" checked /> Top-left origin</label>
+
+    <span class="zoom-wrap" title="Zoom (Ctrl + / Ctrl - / Ctrl 0)">
+      <button id="zoomOut" aria-label="Zoom out">−</button>
+      <input id="zoomRange" type="range" min="50" max="300" step="10" value="100" />
+      <button id="zoomIn" aria-label="Zoom in">+</button>
+      <button id="zoomFit" title="Fit width">Fit</button>
+      <span id="zoomLabel" class="meta">100%</span>
+    </span>
+
+    <span class="legend">Use <code>?page=page-0001</code> and <code>?q=the bay,my house in,england</code>. Phrases span word boxes.</span>
+  </header>
+
+  <main class="stage">
+    <div class="page-outer">
+      <div class="page-wrap" id="pageWrap">
+        <img id="pageImg" alt="page image" />
+        <div id="overlay" class="overlay"></div>
+      </div>
+    </div>
+  </main>
+
+  <div id="toast" class="toast" hidden>0 matches</div>
+
+  <footer>
+  <button id="prevPage">⟨ Prev</button>
+  <span id="pageLabel">page-0001</span>
+  <button id="nextPage">Next ⟩</button>
+</footer>
+
+  <script>
+  // === Elements ===
+  const pageWrap = document.getElementById('pageWrap');
+  const img = document.getElementById('pageImg');
+  const overlay = document.getElementById('overlay');
+  const input = document.getElementById('q');
+  const btnFind = document.getElementById('btnFind');
+  const btnClear = document.getElementById('btnClear');
+  const toast = document.getElementById('toast');
+  const chkDebug = document.getElementById('chkDebug');
+  const chkOrigin = document.getElementById('chkOrigin');
+  const zoomRange = document.getElementById('zoomRange');
+  const zoomInBtn = document.getElementById('zoomIn');
+  const zoomOutBtn = document.getElementById('zoomOut');
+  const zoomFitBtn = document.getElementById('zoomFit');
+  const zoomLabel = document.getElementById('zoomLabel');
+
+  // === State ===
+  let pdfW = null, pdfH = null;
+  let rotation = 0;
+  let originTopLeft = true;
+  let words = [];
+
+  // Phrase-search index (built from words)
+  let searchJoined = '';
+  let searchMap = []; // per character: { wordIndex, isSpace }
+
+  // Zoom state
+  let zoom = 1; // 1 = 100%
+  let fitMode = 'custom'; // 'fit' | 'custom'
+
+
+  // Pan/drag state
+let panMode = false;
+let isPanning = false;
+let panStart = { x: 0, y: 0, scrollX: 0, scrollY: 0 };
+
+
+
+  // === Helpers ===
+  function showToast(msg) {
+    toast.textContent = msg;
+    toast.hidden = false;
+    clearTimeout(showToast._t);
+    showToast._t = setTimeout(() => { toast.hidden = true; }, 11112200);
+  }
+
+  function setZoom(z) {
+    const min = 0.5, max = 3.0;
+    zoom = Math.min(max, Math.max(min, z));
+    pageWrap.style.transform = `scale(${zoom})`;
+    zoomRange.value = Math.round(zoom * 100);
+    zoomLabel.textContent = `${Math.round(zoom * 100)}%`;
+    // No layout() here — transform scales image and overlay together.
+  }
+
+
+  function togglePanMode() {
+panMode = !panMode;
+document.body.classList.toggle('pan', panMode);
+overlay.style.pointerEvents = panMode ? 'none' : 'auto';
+showToast(panMode ? 'Pan mode ON' : 'Pan mode OFF');
+}
+
+
+
+
+  function computeFitZoom() {
+    // Compute scale so the transformed page exactly fills the container width
+    const outerEl = pageWrap.parentElement; // .page-outer
+    const targetWidth = Math.max(100, outerEl.clientWidth);
+    // Current rendered (transformed) width
+    const currentRenderedWidth = img.getBoundingClientRect().width;
+    // Untransformed width (what layout engine gives us before scale)
+    const untransformedWidth = currentRenderedWidth / (zoom || 1);
+    // Desired zoom so transformed width == target width
+    const desiredZoom = targetWidth / untransformedWidth;
+    return desiredZoom;
+  }
+
+  function fitToWidth() {
+    fitMode = 'fit';
+    setZoom(computeFitZoom());
+  }
+
+  function layout() {
+    if (!pdfW || !pdfH) return;
+    const r = img.getBoundingClientRect();
+    // Use pre-transform size for layout so zoom doesn't desync overlay.
+    const scaleX = (r.width / zoom) / pdfW;
+    const scaleY = (r.height / zoom) / pdfH;
+
+    for (const w of words) {
+      const bw = (w.xMax - w.xMin);
+      const bh = (w.yMax - w.yMin);
+      let left = 0, top = 0, width = bw * scaleX, height = bh * scaleY;
+
+      if (rotation === 0) {
+        if (originTopLeft) {
+          left = w.xMin * scaleX;
+          top  = w.yMin * scaleY;
+        } else {
+          left = w.xMin * scaleX;
+          top  = (pdfH - w.yMax) * scaleY;
+        }
+      } else if (rotation === 90) {
+        left = w.yMin * scaleX;
+        top  = (pdfW - w.xMax) * scaleY;
+        width = bh * scaleX;
+        height = bw * scaleY;
+      } else if (rotation === 180) {
+        left = (pdfW - w.xMax) * scaleX;
+        top  = (originTopLeft ? (pdfH - w.yMax) : w.yMin) * scaleY;
+      } else if (rotation === 270) {
+        left = (pdfH - w.yMax) * scaleX;
+        top  = w.xMin * scaleY;
+        width = bh * scaleX;
+        height = bw * scaleY;
+      }
+
+      const el = w.el;
+      el.style.left = left + 'px';
+      el.style.top = top + 'px';
+      el.style.width = width + 'px';
+      el.style.height = height + 'px';
+    }
+  }
+
+  // Normalize a single term (lowercase, collapse spaces)
+  const normalizeTerm = s => String(s || '').toLowerCase().replace(/\s+/g, ' ').trim();
+
+  // Parse comma-separated list -> normalized array
+  function parseQueryList(raw) {
+    if (!raw) return [];
+    return String(raw)
+      .split(',')
+      .map(part => normalizeTerm(part))
+      .filter(Boolean);
+  }
+
+  // Highlight for multiple terms (each can be multi-word, spans boxes)
+  function highlightAny(queryInput) {
+    const terms = Array.isArray(queryInput) ? queryInput : parseQueryList(queryInput);
+
+    for (const w of words) w.el.classList.remove('hit');
+
+    if (!terms.length || !searchJoined) { showToast('0 matches'); return; }
+
+    let firstEl = null;
+    let total = 0;
+
+    for (const term of terms) {
+      if (!term) continue;
+      let from = 0;
+      while (true) {
+        const at = searchJoined.indexOf(term, from);
+        if (at === -1) break;
+        const end = at + term.length;
+        total++;
+
+        const hitSet = new Set();
+        for (let i = at; i < end && i < searchMap.length; i++) {
+          const m = searchMap[i];
+          if (m && !m.isSpace) hitSet.add(m.wordIndex);
+        }
+        for (const idx of hitSet) {
+          const el = words[idx] && words[idx].el;
+          if (el) {
+            el.classList.add('hit');
+            if (!firstEl) firstEl = el;
+          }
+        }
+        from = at + 1;
+      }
+    }
+
+    if (firstEl) {
+      const r = firstEl.getBoundingClientRect();
+      const y = window.scrollY + r.top - (window.innerHeight * 0.35);
+      window.scrollTo({ top: Math.max(0, y), behavior: 'smooth' });
+    }
+
+    showToast(`${total} match${total === 1 ? '' : 'es'} across ${terms.length} term${terms.length === 1 ? '' : 's'}`);
+  }
+
+
+  // Pan events
+const pageOuter = document.querySelector('.page-outer');
+pageOuter.addEventListener('mousedown', (e) => {
+if (!panMode) return;
+isPanning = true;
+document.body.classList.add('panning');
+panStart.x = e.clientX;
+panStart.y = e.clientY;
+panStart.scrollX = window.scrollX;
+panStart.scrollY = window.scrollY;
+e.preventDefault();
+});
+window.addEventListener('mousemove', (e) => {
+if (!isPanning) return;
+const dx = e.clientX - panStart.x;
+const dy = e.clientY - panStart.y;
+window.scrollTo({ left: panStart.scrollX - dx, top: panStart.scrollY - dy });
+});
+
+// Mouse wheel zoom when in pan mode
+window.addEventListener('wheel', (e) => {
+  if (!panMode) return; // only zoom in pan mode
+  e.preventDefault();
+  const delta = e.deltaY;
+  if (delta < 0) {
+    setZoom(zoom + 0.1); // zoom in
+  } else if (delta > 0) {
+    setZoom(zoom - 0.1); // zoom out
+  }
+}, { passive: false });
+
+
+window.addEventListener('mouseup', () => {
+if (!isPanning) return;
+isPanning = false;
+document.body.classList.remove('panning');
+});
+img.addEventListener('dragstart', (e) => e.preventDefault());
+
+
+// Toggle pan mode with Space key
+window.addEventListener('keydown', (e) => {
+if (e.code === 'Space' && !e.repeat) {
+e.preventDefault();
+togglePanMode();
+}
+});
+
+
+
+
+
+  async function loadJSON(url) {
+    const res = await fetch(url);
+    if (!res.ok) throw new Error('Failed to load ' + url + ': ' + res.status);
+    const data = await res.json();
+
+    pdfW = Number(data.width) || null;
+    pdfH = Number(data.height) || null;
+    rotation = ((Number(data.rotation) || 0) % 360 + 360) % 360;
+
+    const items = Array.isArray(data.words) ? data.words : [];
+
+    words = [];
+    overlay.innerHTML = '';
+    let maxX = 0, maxY = 0;
+
+    const PUNCT_END_SET = new Set(['.', ',', ';', ':', '!', '?', ')']);
+
+    for (let idx = 0; idx < items.length; idx++) {
+      const node = items[idx];
+      let { xMin, yMin, xMax, yMax, text: rawText } = node;
+      if (rawText == null) continue;
+      rawText = String(rawText).trim();
+      if (!rawText) continue;
+
+      const lastChar = rawText.charAt(rawText.length - 1);
+      const isHyphenOnly = rawText === '-' || rawText === '–' || rawText === '—';
+      const addSpace = !(PUNCT_END_SET.has(lastChar) || isHyphenOnly);
+      const text = rawText.toLowerCase();
+
+      if (isFinite(pdfW) && isFinite(pdfH)) {
+        xMin = Math.max(0, Math.min(pdfW, Number(xMin)));
+        xMax = Math.max(0, Math.min(pdfW, Number(xMax)));
+        yMin = Math.max(0, Math.min(pdfH, Number(yMin)));
+        yMax = Math.max(0, Math.min(pdfH, Number(yMax)));
+      } else {
+        xMin = Number(xMin); xMax = Number(xMax); yMin = Number(yMin); yMax = Number(yMax);
+      }
+
+      const el = document.createElement('div');
+      el.className = 'word';
+      el.title = rawText;
+      el.textContent = rawText + (addSpace ? '\u00A0' : '');
+      overlay.appendChild(el);
+
+      words.push({ xMin, yMin, xMax, yMax, text, el, sep: addSpace ? ' ' : '' });
+      if (isFinite(xMax)) maxX = Math.max(maxX, xMax);
+      if (isFinite(yMax)) maxY = Math.max(maxY, yMax);
+    }
+
+    if (!pdfW || !pdfH) {
+      pdfW = maxX || 612;
+      pdfH = maxY || 792;
+    }
+
+    // Build phrase-search index from words array
+    searchJoined = '';
+    searchMap = [];
+    for (let i = 0; i < words.length; i++) {
+      const w = words[i];
+      const chunk = w.text;
+      for (let c = 0; c < chunk.length; c++) {
+        searchJoined += chunk[c];
+        searchMap.push({ wordIndex: i, isSpace: false });
+      }
+      if (w.sep) {
+        searchJoined += ' ';
+        searchMap.push({ wordIndex: i, isSpace: true });
+      }
+    }
+
+    layout();
+  }
+
+  function getParam(name) {
+    const usp = new URLSearchParams(location.search);
+    return usp.get(name) || '';
+  }
+
+
+  function changePage(offset) {
+  const base = getParam('page') || 'page-0001';
+  const match = base.match(/^(.*?)(\d+)$/);
+  if (!match) return;
+  const prefix = match[1];
+  const num = parseInt(match[2], 10) + offset;
+  const width = match[2].length;
+  const nextBase = prefix + String(Math.max(1, num)).padStart(width, '0');
+
+  const usp = new URLSearchParams(location.search);
+  usp.set('page', nextBase); // preserve q and others
+  location.search = '?' + usp.toString();
+}
+
+document.getElementById('pageLabel').textContent = getParam('page') || 'page-0001';
+
+document.getElementById('prevPage').addEventListener('click', () => changePage(-1));
+document.getElementById('nextPage').addEventListener('click', () => changePage(1));
+
+
+window.addEventListener('keydown', (e) => {
+  if (['INPUT','TEXTAREA'].includes((e.target.tagName || ''))) return;
+  if (e.key === 'ArrowLeft') { e.preventDefault(); changePage(-1); }
+  if (e.key === 'ArrowRight') { e.preventDefault(); changePage(1); }
+});
+
+
+  // === Events ===
+  img.addEventListener('load', () => { if (fitMode === 'fit') setZoom(computeFitZoom()); layout(); });
+  window.addEventListener('resize', () => {
+    if (fitMode === 'fit') setZoom(computeFitZoom());
+    layout();
+  });
+  btnFind.addEventListener('click', () => highlightAny(input.value));
+  btnClear.addEventListener('click', () => { input.value = ''; highlightAny(''); });
+  if (chkDebug) {
+    chkDebug.addEventListener('change', () => {
+      document.body.classList.toggle('debug', chkDebug.checked);
+    });
+  }
+  if (chkOrigin) {
+    originTopLeft = chkOrigin.checked;
+    chkOrigin.addEventListener('change', () => { originTopLeft = chkOrigin.checked; layout(); });
+  }
+
+  // Zoom controls
+  zoomRange.addEventListener('input', () => { fitMode = 'custom'; setZoom(Number(zoomRange.value) / 100); });
+  zoomInBtn.addEventListener('click', () => { fitMode = 'custom'; setZoom(zoom + 0.1); });
+  zoomOutBtn.addEventListener('click', () => { fitMode = 'custom'; setZoom(zoom - 0.1); });
+  zoomFitBtn.addEventListener('click', fitToWidth);
+
+  // Keyboard shortcuts: Ctrl/Cmd +/-, Ctrl/Cmd 0
+  window.addEventListener('keydown', (e) => {
+    const plus = (e.key === '=' || e.key === '+');
+    const minus = (e.key === '-' || e.key === '_');
+    const zero = (e.key === '0');
+    if ((e.ctrlKey || e.metaKey) && (plus || minus || zero)) {
+      e.preventDefault();
+      if (plus) setZoom(zoom + 0.1);
+      else if (minus) setZoom(zoom - 0.1);
+      else if (zero) setZoom(1);
+    }
+  });
+
+  // === Init ===
+  (async function init() {
+    const base = getParam('page') || 'page-0001';
+    const imageFile = base + '.webp';
+    const jsonFile  = base + '.json';
+
+    img.src = imageFile;
+    try {
+      await loadJSON(jsonFile);
+    } catch (err) {
+      console.error(err);
+      alert(err.message);
+      return;
+    }
+
+    // Support multi-term q: comma-separated
+    const rawQ = getParam('q');
+    if (rawQ) {
+      input.value = rawQ;
+      highlightAny(rawQ);
+    }
+
+    setZoom(1); // initialize UI
+  })();
+</script>
+</body>
+</html>
