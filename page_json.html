@@ -13,16 +13,17 @@
       --bg: #0b0f14;
       --fg: #e6eef7;
       --muted: #9ab;
+      --header-h: 0px;
     }
     html, body { height: 100%; margin: 0; background: var(--bg); color: var(--fg); font: 14px/1.4 system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, Noto Sans, "Helvetica Neue", Arial, "Apple Color Emoji", "Segoe UI Emoji"; }
-    header { display: flex; flex-wrap: wrap; gap: .75rem; align-items: center; padding: .75rem 1rem; position: sticky; top: 0; background: linear-gradient(to bottom, rgba(0,0,0,.65), rgba(0,0,0,.35), transparent); backdrop-filter: blur(6px); z-index: 10; }
+    header { display: flex; flex-wrap: wrap; gap: .75rem; align-items: center; padding: .75rem 1rem; position: fixed; top: 0; left: 0; right: 0; background: linear-gradient(to bottom, rgba(0,0,0,.65), rgba(0,0,0,.35), transparent); backdrop-filter: blur(6px); z-index: 10; }
     header input[type="search"] { flex: 1 1 280px; padding: .6rem .75rem; border-radius: .6rem; border: 1px solid #334; background: #0f1621; color: var(--fg); }
     header button, header label { padding: .55rem .8rem; border-radius: .6rem; border: 1px solid #334; background: #0f1621; color: var(--fg); cursor: pointer; display: inline-flex; align-items: center; gap: .4rem; }
     header .meta { font-size: 12px; color: var(--muted); }
     .zoom-wrap { display: inline-flex; align-items: center; gap: .5rem; padding: .4rem .6rem; border-radius: .6rem; border: 1px solid #334; background: #0f1621; }
     .zoom-wrap input[type="range"] { width: 160px; }
 
-    .stage { display: grid; place-content: start center; padding: 1rem; }
+    .stage { display: grid; place-content: start center; padding: 1rem; padding-top: calc(var(--header-h) + 1rem); }
     .page-outer { position: relative; }
     .page-wrap { position: relative; transform-origin: top left; }
     .page-wrap img { width: 100%; height: auto; display: block; box-shadow: 0 10px 30px rgba(0,0,0,.45); border-radius: .5rem; }
@@ -90,6 +91,7 @@
   const zoomOutBtn = document.getElementById('zoomOut');
   const zoomFitBtn = document.getElementById('zoomFit');
   const zoomLabel = document.getElementById('zoomLabel');
+  const headerEl = document.querySelector('header');
 
   // === State ===
   let pdfW = null, pdfH = null;
@@ -120,6 +122,12 @@ let panStart = { x: 0, y: 0, scrollX: 0, scrollY: 0 };
     clearTimeout(showToast._t);
     showToast._t = setTimeout(() => { toast.hidden = true; }, 11112200);
   }
+
+  function updateHeaderOffset() {
+    document.documentElement.style.setProperty('--header-h', `${headerEl.offsetHeight}px`);
+  }
+
+  updateHeaderOffset();
 
   function setZoom(z) {
     const min = 0.5, max = 3.0;
@@ -423,6 +431,7 @@ window.addEventListener('keydown', (e) => {
   window.addEventListener('resize', () => {
     if (fitMode === 'fit') setZoom(computeFitZoom());
     layout();
+    updateHeaderOffset();
   });
   btnFind.addEventListener('click', () => highlightAny(input.value));
   btnClear.addEventListener('click', () => { input.value = ''; highlightAny(''); });
