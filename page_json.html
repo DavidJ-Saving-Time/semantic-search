@@ -14,15 +14,14 @@
       --fg: #e6eef7;
       --muted: #9ab;
     }
-    html, body { min-height: 100%; margin: 0; background: var(--bg); color: var(--fg); font: 14px/1.4 system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, Noto Sans, "Helvetica Neue", Arial, "Apple Color Emoji", "Segoe UI Emoji"; }
-    header { --header-height: 60px; box-sizing: border-box; display: flex; flex-wrap: wrap; gap: .75rem; align-items: center; padding: .75rem 1rem; position: fixed; top: 0; left: 0; right: 0; height: var(--header-height); background: linear-gradient(to bottom, rgba(0,0,0,.65), rgba(0,0,0,.35), transparent); backdrop-filter: blur(6px); z-index: 1000; }
+    html, body { height: 100%; margin: 0; background: var(--bg); color: var(--fg); font: 14px/1.4 system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, Noto Sans, "Helvetica Neue", Arial, "Apple Color Emoji", "Segoe UI Emoji"; }
+    header { display: flex; flex-wrap: wrap; gap: .75rem; align-items: center; padding: .75rem 1rem; position: sticky; top: 0; background: linear-gradient(to bottom, rgba(0,0,0,.65), rgba(0,0,0,.35), transparent); backdrop-filter: blur(6px); z-index: 10; }
     header input[type="search"] { flex: 1 1 280px; padding: .6rem .75rem; border-radius: .6rem; border: 1px solid #334; background: #0f1621; color: var(--fg); }
     header button, header label { padding: .55rem .8rem; border-radius: .6rem; border: 1px solid #334; background: #0f1621; color: var(--fg); cursor: pointer; display: inline-flex; align-items: center; gap: .4rem; }
     header .meta { font-size: 12px; color: var(--muted); }
     .zoom-wrap { display: inline-flex; align-items: center; gap: .5rem; padding: .4rem .6rem; border-radius: .6rem; border: 1px solid #334; background: #0f1621; }
     .zoom-wrap input[type="range"] { width: 160px; }
 
-    #viewport { position: absolute; top: var(--header-height); left: 0; right: 0; bottom: 0; overflow: auto; }
     .stage { display: grid; place-content: start center; padding: 1rem; }
     .page-outer { position: relative; }
     .page-wrap { position: relative; transform-origin: top left; }
@@ -58,28 +57,25 @@
     <span class="legend">Use <code>?page=page-0001</code> and <code>?q=the bay,my house in,england</code>. Phrases span word boxes.</span>
   </header>
 
-  <div id="viewport">
-    <main class="stage">
-      <div class="page-outer">
-        <div class="page-wrap" id="pageWrap">
-          <img id="pageImg" alt="page image" />
-          <div id="overlay" class="overlay"></div>
-        </div>
+  <main class="stage">
+    <div class="page-outer">
+      <div class="page-wrap" id="pageWrap">
+        <img id="pageImg" alt="page image" />
+        <div id="overlay" class="overlay"></div>
       </div>
-    </main>
+    </div>
+  </main>
 
-    <div id="toast" class="toast" hidden>0 matches</div>
+  <div id="toast" class="toast" hidden>0 matches</div>
 
-    <footer>
-      <button id="prevPage">⟨ Prev</button>
-      <span id="pageLabel">page-0001</span>
-      <button id="nextPage">Next ⟩</button>
-    </footer>
-  </div>
+  <footer>
+  <button id="prevPage">⟨ Prev</button>
+  <span id="pageLabel">page-0001</span>
+  <button id="nextPage">Next ⟩</button>
+</footer>
 
   <script>
   // === Elements ===
-  const viewport = document.getElementById('viewport');
   const pageWrap = document.getElementById('pageWrap');
   const img = document.getElementById('pageImg');
   const overlay = document.getElementById('overlay');
@@ -255,9 +251,9 @@ showToast(panMode ? 'Pan mode ON' : 'Pan mode OFF');
     }
 
     if (firstEl) {
-        const r = firstEl.getBoundingClientRect();
-        const y = viewport.scrollTop + r.top - (viewport.clientHeight * 0.35);
-        viewport.scrollTo({ top: Math.max(0, y), behavior: 'smooth' });
+      const r = firstEl.getBoundingClientRect();
+      const y = window.scrollY + r.top - (window.innerHeight * 0.35);
+      window.scrollTo({ top: Math.max(0, y), behavior: 'smooth' });
     }
 
     showToast(`${total} match${total === 1 ? '' : 'es'} across ${terms.length} term${terms.length === 1 ? '' : 's'}`);
@@ -265,26 +261,26 @@ showToast(panMode ? 'Pan mode ON' : 'Pan mode OFF');
 
 
   // Pan events
-  const pageOuter = document.querySelector('.page-outer');
-  pageOuter.addEventListener('mousedown', (e) => {
-  if (!panMode) return;
-  isPanning = true;
-  document.body.classList.add('panning');
-  panStart.x = e.clientX;
-  panStart.y = e.clientY;
-  panStart.scrollX = viewport.scrollLeft;
-  panStart.scrollY = viewport.scrollTop;
-  e.preventDefault();
-  });
-  window.addEventListener('mousemove', (e) => {
-  if (!isPanning) return;
-  const dx = e.clientX - panStart.x;
-  const dy = e.clientY - panStart.y;
-  viewport.scrollTo({ left: panStart.scrollX - dx, top: panStart.scrollY - dy });
-  });
+const pageOuter = document.querySelector('.page-outer');
+pageOuter.addEventListener('mousedown', (e) => {
+if (!panMode) return;
+isPanning = true;
+document.body.classList.add('panning');
+panStart.x = e.clientX;
+panStart.y = e.clientY;
+panStart.scrollX = window.scrollX;
+panStart.scrollY = window.scrollY;
+e.preventDefault();
+});
+window.addEventListener('mousemove', (e) => {
+if (!isPanning) return;
+const dx = e.clientX - panStart.x;
+const dy = e.clientY - panStart.y;
+window.scrollTo({ left: panStart.scrollX - dx, top: panStart.scrollY - dy });
+});
 
 // Mouse wheel zoom when in pan mode
-viewport.addEventListener('wheel', (e) => {
+window.addEventListener('wheel', (e) => {
   if (!panMode) return; // only zoom in pan mode
   e.preventDefault();
   const delta = e.deltaY;
