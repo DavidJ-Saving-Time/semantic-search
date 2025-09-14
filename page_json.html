@@ -129,6 +129,19 @@ let panStart = { x: 0, y: 0, scrollX: 0, scrollY: 0 };
 
   updateHeaderOffset();
 
+
+  function updateContainerSize() {
+    const outer = pageWrap.parentElement;
+    const nw = img.naturalWidth;
+    const nh = img.naturalHeight;
+    if (!nw || !nh) return;
+    pageWrap.style.width = `${nw}px`;
+    pageWrap.style.height = `${nh}px`;
+    outer.style.width = `${nw * zoom}px`;
+    outer.style.height = `${nh * zoom}px`;
+  }
+
+
   function setZoom(z) {
     const min = 0.5, max = 3.0;
     zoom = Math.min(max, Math.max(min, z));
@@ -136,6 +149,7 @@ let panStart = { x: 0, y: 0, scrollX: 0, scrollY: 0 };
     zoomRange.value = Math.round(zoom * 100);
     zoomLabel.textContent = `${Math.round(zoom * 100)}%`;
     // No layout() here — transform scales image and overlay together.
+    updateContainerSize();
   }
 
 
@@ -427,7 +441,7 @@ window.addEventListener('keydown', (e) => {
 
 
   // === Events ===
-  img.addEventListener('load', () => { if (fitMode === 'fit') setZoom(computeFitZoom()); layout(); });
+  img.addEventListener('load', () => { if (fitMode === 'fit') setZoom(computeFitZoom()); updateContainerSize(); layout(); });
   window.addEventListener('resize', () => {
     if (fitMode === 'fit') setZoom(computeFitZoom());
     layout();
