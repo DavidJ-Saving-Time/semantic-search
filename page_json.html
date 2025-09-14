@@ -105,7 +105,7 @@
 
   // Zoom state
   let zoom = 1; // 1 = 100%
-  let fitMode = 'custom'; // 'fit' | 'custom'
+  let fitMode = 'fit'; // start in fit-to-width mode
 
 
   // Pan/drag state
@@ -164,16 +164,14 @@ showToast(panMode ? 'Pan mode ON' : 'Pan mode OFF');
 
 
   function computeFitZoom() {
-    // Compute scale so the transformed page exactly fills the container width
+    // Compute scale so the page fits the width of the stage container
     const outerEl = pageWrap.parentElement; // .page-outer
-    const targetWidth = Math.max(100, outerEl.clientWidth);
-    // Current rendered (transformed) width
-    const currentRenderedWidth = img.getBoundingClientRect().width;
-    // Untransformed width (what layout engine gives us before scale)
-    const untransformedWidth = currentRenderedWidth / (zoom || 1);
-    // Desired zoom so transformed width == target width
-    const desiredZoom = targetWidth / untransformedWidth;
-    return desiredZoom;
+    const stageEl = outerEl.parentElement; // .stage
+    const styles = getComputedStyle(stageEl);
+    const padding = parseFloat(styles.paddingLeft) + parseFloat(styles.paddingRight);
+    const targetWidth = Math.max(100, stageEl.clientWidth - padding);
+    const naturalWidth = img.naturalWidth || 1;
+    return targetWidth / naturalWidth;
   }
 
   function fitToWidth() {
@@ -500,7 +498,6 @@ window.addEventListener('keydown', (e) => {
       highlightAny(rawQ);
     }
 
-    setZoom(1); // initialize UI
   })();
 </script>
 </body>
