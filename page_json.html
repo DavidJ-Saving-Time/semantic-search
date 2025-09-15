@@ -72,11 +72,12 @@
   <div id="toast" class="toast" hidden>0 matches</div>
 
   <footer>
-  <button id="prevPage">⟨ Prev</button>
-  <span id="pageLabel">page-0001</span>
-  <button id="nextPage">Next ⟩</button>
-</footer>
+    <button id="prevPage">⟨ Prev</button>
+    <span id="pageLabel">page-0001</span>
+    <button id="nextPage">Next ⟩</button>
+  </footer>
 
+  <script src="https://unpkg.com/@panzoom/panzoom@4.6.0/dist/panzoom.min.js"></script>
   <script>
   // === Elements ===
   const pageWrap = document.getElementById('pageWrap');
@@ -108,29 +109,11 @@
   // Zoom state
   let zoom = 1; // 1 = 100%
   let fitMode = 'fit'; // start in fit-to-width mode
-  let zoomAnimation = null;
 
   const ZOOM_MIN = 0.5;
   const ZOOM_MAX = 3.0;
-  const WHEEL_LINE_HEIGHT = 16;
-  const WHEEL_ZOOM_SENSITIVITY = 0.0015;
 
-  const clampZoom = value => Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, value));
-
-  function normalizeWheelDeltaY(evt) {
-    if (!evt) return 0;
-    if (evt.deltaMode === 1) return evt.deltaY * WHEEL_LINE_HEIGHT; // DOM_DELTA_LINE
-    if (evt.deltaMode === 2) return evt.deltaY * (window.innerHeight || 1); // DOM_DELTA_PAGE
-    return evt.deltaY;
-  }
-
-
-  // Pan/drag state
-let panMode = false;
-let isPanning = false;
-let panStart = { x: 0, y: 0, scrollX: 0, scrollY: 0 };
-
-
+  let panzoom = null;
 
   // === Helpers ===
   function showToast(msg) {
@@ -165,94 +148,32 @@ let panStart = { x: 0, y: 0, scrollX: 0, scrollY: 0 };
     outer.style.height = `${nh * zoom}px`;
   }
 
-
-  function setZoom(z, opts = {}) {
-    const targetZoom = clampZoom(z);
-
-    const hasAnchor = opts.anchor && opts.anchorClient
-      && Number.isFinite(opts.anchor.x) && Number.isFinite(opts.anchor.y)
-      && Number.isFinite(opts.anchorClient.x) && Number.isFinite(opts.anchorClient.y)
-      && Number.isFinite(opts.docLeft) && Number.isFinite(opts.docTop);
-
-    const anchorData = hasAnchor
-      ? {
-          anchor: opts.anchor,
-          anchorClient: opts.anchorClient,
-          docLeft: opts.docLeft,
-          docTop: opts.docTop,
-        }
-      : null;
-
-    const adjustScroll = (data, currentZoom) => {
-      const left = data.docLeft + data.anchor.x * currentZoom - data.anchorClient.x;
-      const top = data.docTop + data.anchor.y * currentZoom - data.anchorClient.y;
-      window.scrollTo({ left, top, behavior: 'auto' });
-    };
-
-    if (targetZoom === zoom) {
-      if (anchorData) adjustScroll(anchorData, zoom);
-      return zoom;
-    }
-
-    if (zoomAnimation && zoomAnimation.rafId) {
-      cancelAnimationFrame(zoomAnimation.rafId);
-      zoomAnimation = null;
-    }
-
-    const applyZoom = value => {
-      zoom = value;
-      pageWrap.style.transform = `scale(${zoom})`;
-      const sliderValue = Math.round(zoom * 100);
-      if (zoomRange) zoomRange.value = sliderValue;
-      if (zoomLabel) zoomLabel.textContent = `${sliderValue}%`;
-      // No layout() here — transform scales image and overlay together.
-      updateContainerSize();
-      if (anchorData) adjustScroll(anchorData, zoom);
-    };
-
-    if (opts.animate) {
-      const duration = Math.max(0, Number(opts.duration) || 200);
-      const startZoom = zoom;
-      const diff = targetZoom - startZoom;
-      const ease = typeof opts.easing === 'function'
-        ? opts.easing
-        : (t => 1 - Math.pow(1 - t, 3)); // easeOutCubic
-
-      const startTime = performance.now();
-      zoomAnimation = {};
-
-      const step = now => {
-        if (!zoomAnimation) return;
-        const t = Math.min(1, (now - startTime) / duration);
-        const eased = ease(t);
-        applyZoom(startZoom + diff * eased);
-        if (t < 1) {
-          zoomAnimation.rafId = requestAnimationFrame(step);
-        } else {
-          zoomAnimation = null;
-          applyZoom(targetZoom);
-        }
-      };
-
-      zoomAnimation.rafId = requestAnimationFrame(step);
-    } else {
-      applyZoom(targetZoom);
-    }
-
-    return zoom;
-  }
-
-
+  panzoom = Panzoom(pageWrap, { minScale: ZOOM_MIN, maxScale: ZOOM_MAX, disablePan: true });
+  pageWrap.parentElement.addEventListener('wheel', event => {
+    fitMode = 'custom';
+    panzoom.zoomWithWheel(event);
+  }, { passive: false });
+  pageWrap.addEventListener('panzoomchange', e => {
+    zoom = e.detail.scale;
+    updateContainerSize();
+    layout();
+    zoomRange.value = Math.round(zoom * 100);
+    zoomLabel.textContent = `${zoomRange.value}%`;
+  });
+  zoom = panzoom.getScale();
+  zoomRange.value = Math.round(zoom * 100);
+  zoomLabel.textContent = `${zoomRange.value}%`;
   function togglePanMode() {
-    panMode = !panMode;
-    document.body.classList.toggle('pan', panMode);
-    overlay.style.pointerEvents = panMode ? 'none' : 'auto';
-    if (!panMode) {
-      isPanning = false;
-      document.body.classList.remove('panning');
+    const nextPan = !document.body.classList.contains('pan');
+    document.body.classList.toggle('pan', nextPan);
+    overlay.style.pointerEvents = nextPan ? 'none' : 'auto';
+    if (panzoom) {
+      panzoom.setOptions({ disablePan: !nextPan });
+    }
+    if (!nextPan) {
       fitToWidth();
     }
-    showToast(panMode ? 'Pan mode ON' : 'Pan mode OFF');
+    showToast(nextPan ? 'Pan mode ON' : 'Pan mode OFF');
   }
 
 
@@ -271,7 +192,9 @@ let panStart = { x: 0, y: 0, scrollX: 0, scrollY: 0 };
 
   function fitToWidth() {
     fitMode = 'fit';
-    setZoom(computeFitZoom());
+    if (panzoom) {
+      panzoom.zoomTo(computeFitZoom());
+    }
   }
 
   function layout() {
@@ -373,75 +296,6 @@ let panStart = { x: 0, y: 0, scrollX: 0, scrollY: 0 };
 
     showToast(`${total} match${total === 1 ? '' : 'es'} across ${terms.length} term${terms.length === 1 ? '' : 's'}`);
   }
-
-
-  // Pan events
-const pageOuter = document.querySelector('.page-outer');
-pageOuter.addEventListener('mousedown', (e) => {
-if (!panMode) return;
-isPanning = true;
-document.body.classList.add('panning');
-panStart.x = e.clientX;
-panStart.y = e.clientY;
-panStart.scrollX = window.scrollX;
-panStart.scrollY = window.scrollY;
-e.preventDefault();
-});
-window.addEventListener('mousemove', (e) => {
-if (!isPanning) return;
-const dx = e.clientX - panStart.x;
-const dy = e.clientY - panStart.y;
-window.scrollTo({ left: panStart.scrollX - dx, top: panStart.scrollY - dy });
-});
-
-// Mouse wheel zoom when in pan mode
-window.addEventListener('wheel', (e) => {
-  if (!panMode) return; // only zoom in pan mode
-
-  e.preventDefault();
-
-  const delta = normalizeWheelDeltaY(e);
-  if (!delta) return;
-
-  fitMode = 'custom';
-
-  const rect = pageWrap.getBoundingClientRect();
-  const anchorClient = { x: e.clientX, y: e.clientY };
-
-  const targetZoom = clampZoom(zoom * Math.exp(-delta * WHEEL_ZOOM_SENSITIVITY));
-  const diff = Math.abs(targetZoom - zoom);
-  const animate = diff > 0.0005;
-  const duration = 160 + Math.min(240, diff * 400);
-
-  if (!rect || !rect.width || !rect.height) {
-    setZoom(targetZoom, { animate, duration });
-    return;
-  }
-
-  const anchor = {
-    x: (anchorClient.x - rect.left) / zoom,
-    y: (anchorClient.y - rect.top) / zoom,
-  };
-
-  setZoom(targetZoom, {
-    animate,
-    duration,
-    anchor,
-    anchorClient,
-    docLeft: rect.left + window.scrollX,
-    docTop: rect.top + window.scrollY,
-  });
-}, { passive: false });
-
-
-window.addEventListener('mouseup', () => {
-if (!isPanning) return;
-isPanning = false;
-document.body.classList.remove('panning');
-});
-img.addEventListener('dragstart', (e) => e.preventDefault());
-
-
 // Toggle pan mode with "P"
 window.addEventListener('keydown', (e) => {
   if (e.code === 'KeyP' && !e.repeat && !e.altKey && !e.ctrlKey && !e.metaKey) {
@@ -562,9 +416,18 @@ window.addEventListener('keydown', (e) => {
 
 
   // === Events ===
-  img.addEventListener('load', () => { if (fitMode === 'fit') setZoom(computeFitZoom()); updateContainerSize(); layout(); });
+  img.addEventListener('dragstart', (e) => e.preventDefault());
+  img.addEventListener('load', () => {
+    if (fitMode === 'fit' && panzoom) {
+      panzoom.zoomTo(computeFitZoom());
+    }
+    updateContainerSize();
+    layout();
+  });
   window.addEventListener('resize', () => {
-    if (fitMode === 'fit') setZoom(computeFitZoom());
+    if (fitMode === 'fit' && panzoom) {
+      panzoom.zoomTo(computeFitZoom());
+    }
     layout();
     updateHeaderOffset();
   });
@@ -581,9 +444,24 @@ window.addEventListener('keydown', (e) => {
   }
 
   // Zoom controls
-  zoomRange.addEventListener('input', () => { fitMode = 'custom'; setZoom(Number(zoomRange.value) / 100); });
-  zoomInBtn.addEventListener('click', () => { fitMode = 'custom'; setZoom(zoom + 0.1); });
-  zoomOutBtn.addEventListener('click', () => { fitMode = 'custom'; setZoom(zoom - 0.1); });
+  zoomRange.addEventListener('input', () => {
+    fitMode = 'custom';
+    if (panzoom) {
+      panzoom.zoomTo(Number(zoomRange.value) / 100);
+    }
+  });
+  zoomInBtn.addEventListener('click', () => {
+    fitMode = 'custom';
+    if (panzoom) {
+      panzoom.zoomTo(Math.min(ZOOM_MAX, zoom + 0.1));
+    }
+  });
+  zoomOutBtn.addEventListener('click', () => {
+    fitMode = 'custom';
+    if (panzoom) {
+      panzoom.zoomTo(Math.max(ZOOM_MIN, zoom - 0.1));
+    }
+  });
   zoomFitBtn.addEventListener('click', fitToWidth);
 
   // Keyboard shortcuts: Ctrl/Cmd +/-, Ctrl/Cmd 0
@@ -593,9 +471,11 @@ window.addEventListener('keydown', (e) => {
     const zero = (e.key === '0');
     if ((e.ctrlKey || e.metaKey) && (plus || minus || zero)) {
       e.preventDefault();
-      if (plus) setZoom(zoom + 0.1);
-      else if (minus) setZoom(zoom - 0.1);
-      else if (zero) setZoom(1);
+      if (!panzoom) return;
+      fitMode = 'custom';
+      if (plus) panzoom.zoomTo(Math.min(ZOOM_MAX, zoom + 0.1));
+      else if (minus) panzoom.zoomTo(Math.max(ZOOM_MIN, zoom - 0.1));
+      else if (zero) panzoom.zoomTo(1);
     }
   });
 // encode each path segment; keep slashes
