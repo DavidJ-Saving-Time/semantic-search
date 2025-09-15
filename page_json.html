@@ -125,6 +125,13 @@ let panStart = { x: 0, y: 0, scrollX: 0, scrollY: 0 };
     showToast._t = setTimeout(() => { toast.hidden = true; }, 11112200);
   }
 
+  function isEditableTarget(el) {
+    if (!el) return false;
+    if (el.isContentEditable) return true;
+    const tag = (el.tagName || '').toUpperCase();
+    return tag === 'INPUT' || tag === 'TEXTAREA';
+  }
+
   function updateHeaderOffset() {
     document.documentElement.style.setProperty('--header-h', `${headerEl.offsetHeight}px`);
   }
@@ -156,11 +163,16 @@ let panStart = { x: 0, y: 0, scrollX: 0, scrollY: 0 };
 
 
   function togglePanMode() {
-panMode = !panMode;
-document.body.classList.toggle('pan', panMode);
-overlay.style.pointerEvents = panMode ? 'none' : 'auto';
-showToast(panMode ? 'Pan mode ON' : 'Pan mode OFF');
-}
+    panMode = !panMode;
+    document.body.classList.toggle('pan', panMode);
+    overlay.style.pointerEvents = panMode ? 'none' : 'auto';
+    if (!panMode) {
+      isPanning = false;
+      document.body.classList.remove('panning');
+      fitToWidth();
+    }
+    showToast(panMode ? 'Pan mode ON' : 'Pan mode OFF');
+  }
 
 
 
@@ -322,12 +334,13 @@ document.body.classList.remove('panning');
 img.addEventListener('dragstart', (e) => e.preventDefault());
 
 
-// Toggle pan mode with Space key
+// Toggle pan mode with "P"
 window.addEventListener('keydown', (e) => {
-if (e.code === 'Space' && !e.repeat) {
-e.preventDefault();
-togglePanMode();
-}
+  if (e.code === 'KeyP' && !e.repeat && !e.altKey && !e.ctrlKey && !e.metaKey) {
+    if (isEditableTarget(e.target)) return;
+    e.preventDefault();
+    togglePanMode();
+  }
 });
 
 
