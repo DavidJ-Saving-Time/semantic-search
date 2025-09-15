@@ -307,6 +307,7 @@ SELECT s.id,
        (SELECT w_sem FROM params)*s.sim + (SELECT w_topic FROM params)*s.topic_boost AS final_score,
        d.meta->>'issue' AS issue,
        d.meta->>'title' AS title,
+       d.meta->>'anchor' AS anchor,
        (d.meta->>'first_page')::int AS first_page
 FROM scored s
 JOIN docs d ON d.id = s.id
@@ -360,6 +361,19 @@ function english_title_case($str)
     return implode(' ', $words);
 }
 
+
+
+$anchors_raw = $row['anchor'] ?? '';
+$anchors = is_array($anchors_raw) ? $anchors_raw : (json_decode($anchors_raw, true) ?: []);
+
+// 2) Make a simple CSV string (M.P.,Lloyd’s,Lord John Russell,Jeremy Taylor)
+$csv = implode(',', array_map('trim', $anchors));
+
+// 3) Build your link with proper encoding of the query params
+$hrefILN = '/ILN/page_json.html?' . http_build_query([
+  'page' => '/' . ($row['issue'] ?? '') . '/pages/page-000' . ($row['first_page'] ?? ''),
+  'q'    => $csv,
+]);
 
 $venvPy = '/srv/http/calibre-nilla/reranker/.venv/bin/python';
 $cli    = '/srv/http/calibre-nilla/reranker/rerank_cli.py';
@@ -519,14 +533,31 @@ usort($results, function ($a, $b) use ($scores) {
         </div>
       <?php else: ?>
         <ol class="list-group list-group-numbered">
-          <?php foreach ($results as $row): ?>
+          <?php foreach ($results as $row):
+              $anchors_raw = $row['anchor'] ?? '';
+              $anchors = is_array($anchors_raw) ? $anchors_raw : (json_decode($anchors_raw, true) ?: []);
+
+              // 2) Make a simple CSV string (M.P.,Lloyd’s,Lord John Russell,Jeremy Taylor)
+              $csv = implode(',', array_map('trim', $anchors));
+
+              // 3) Build your link with proper encoding of the query params
+              $hrefILN = 'page_json.html?' . http_build_query([
+                'page' => '/ILN/' . ($row['issue'] ?? '') . '/pages/page-000' . ($row['first_page'] ?? ''),
+                'q'    => $csv,
+              ]);
+
+              ?>
             <li class="list-group-item">
               <div class="d-flex justify-content-between align-items-start gap-3">
                 <div class="flex-grow-1">
                   <div class="mb-1">
                     <?=h($row['issue'] ?? '')?>
                     <div class="btn-group btn-group-sm ms-2" role="group" aria-label="Result links">
-                      <a class="btn btn-outline-secondary" target="_blank" rel="noopener" href="/EWJ_issues/<?=h($row['issue'] ?? '')?>.pdf#page=<?=h($row['first_page'] ?? '')?>">
+               
+                    <a class="btn btn-outline-secondary" target="_blank" rel="noopener"
+   href="<?= $hrefILN ?>"
+
+>
                         <i class="fa-solid fa-up-right-from-square me-1" aria-hidden="true"></i>Source
                       </a>
                       <a class="btn btn-outline-secondary js-view-md" target="_blank" rel="noopener" href="/EWJ_issues/<?=h($row['issue'] ?? '')?>.md">

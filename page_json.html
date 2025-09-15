@@ -47,7 +47,7 @@
     <button id="btnFind" title="Find">Find</button>
     <button id="btnClear" title="Clear">Clear</button>
     <label id="lblDebug" title="Toggle debug outlines"><input id="chkDebug" type="checkbox" /> Debug</label>
-    <label id="lblOrigin" title="Toggle Y-origin (top-left vs bottom-left)"><input id="chkOrigin" type="checkbox" checked /> Top-left origin</label>
+
 
     <span class="zoom-wrap" title="Zoom (Ctrl + / Ctrl - / Ctrl 0)">
       <button id="zoomOut" aria-label="Zoom out">−</button>
@@ -57,7 +57,7 @@
       <span id="zoomLabel" class="meta">100%</span>
     </span>
 
-    <span class="legend">Use <code>?page=page-0001</code> and <code>?q=the bay,my house in,england</code>. Phrases span word boxes.</span>
+
   </header>
 
   <main class="stage">
@@ -477,12 +477,23 @@ window.addEventListener('keydown', (e) => {
       else if (zero) setZoom(1);
     }
   });
-
+// encode each path segment; keep slashes
+const encPath = s => s.split('/').map(encodeURIComponent).join('/');
+// pad to 4 digits
+const pad4 = n => String(n).padStart(4, '0');
   // === Init ===
   (async function init() {
-    const base = getParam('page') || 'page-0001';
-    const imageFile = base + '.webp';
-    const jsonFile  = base + '.json';
+    const base = getParam('page') || '/ILN/.../pages/page-0001';
+
+// ✅ parse to int, then pad — converts page-00012 -> page-0012
+const fixedBase = base.replace(/page-(\d+)$/, (_, num) =>
+  'page-' + pad4(parseInt(num, 10) || 0)
+);
+
+const imageFile = encPath(fixedBase) + '.webp';
+const textBase  = fixedBase.replace('/pages/', '/text/');
+const jsonFile  = encPath(textBase) + '.json';
+
 
     img.src = imageFile;
     try {
