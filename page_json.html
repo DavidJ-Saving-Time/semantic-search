@@ -114,6 +114,9 @@
   const ZOOM_MAX = 3.0;
   const WHEEL_LINE_HEIGHT = 16;
   const WHEEL_ZOOM_SENSITIVITY = 0.0015;
+  const ZOOM_SMOOTH_TAU = 120;
+  const GESTURE_IDLE_MS = 140;
+  const MIN_ANIM_DIFF = 0.0005;
 
   const clampZoom = value => Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, value));
 
@@ -129,6 +132,9 @@
 let panMode = false;
 let isPanning = false;
 let panStart = { x: 0, y: 0, scrollX: 0, scrollY: 0 };
+
+let wheelGesture = null;
+let wheelRaf = 0;
 
 
 
@@ -243,11 +249,62 @@ let panStart = { x: 0, y: 0, scrollX: 0, scrollY: 0 };
   }
 
 
+  function stopWheelAnimation() {
+    if (wheelRaf) {
+      cancelAnimationFrame(wheelRaf);
+      wheelRaf = 0;
+    }
+    wheelGesture = null;
+  }
+
+  function wheelAnimate(now) {
+    if (!wheelGesture) {
+      wheelRaf = 0;
+      return;
+    }
+
+    if (!panMode) {
+      stopWheelAnimation();
+      return;
+    }
+
+    const gesture = wheelGesture;
+    const dt = Math.max(0, now - (gesture.lastTime || now));
+    gesture.lastTime = now;
+
+    const lambda = 1 - Math.exp(-dt / ZOOM_SMOOTH_TAU);
+    const nextZoom = zoom + (gesture.targetZoom - zoom) * lambda;
+
+    setZoom(nextZoom, {
+      animate: false,
+      anchor: gesture.anchor,
+      anchorClient: gesture.anchorClient,
+      docLeft: gesture.docLeft,
+      docTop: gesture.docTop,
+    });
+
+    if ((now - gesture.idleAt) > GESTURE_IDLE_MS && Math.abs(zoom - gesture.targetZoom) < MIN_ANIM_DIFF) {
+      setZoom(gesture.targetZoom, {
+        animate: false,
+        anchor: gesture.anchor,
+        anchorClient: gesture.anchorClient,
+        docLeft: gesture.docLeft,
+        docTop: gesture.docTop,
+      });
+      stopWheelAnimation();
+      return;
+    }
+
+    wheelRaf = requestAnimationFrame(wheelAnimate);
+  }
+
+
   function togglePanMode() {
     panMode = !panMode;
     document.body.classList.toggle('pan', panMode);
     overlay.style.pointerEvents = panMode ? 'none' : 'auto';
     if (!panMode) {
+      stopWheelAnimation();
       isPanning = false;
       document.body.classList.remove('panning');
       fitToWidth();
@@ -271,6 +328,7 @@ let panStart = { x: 0, y: 0, scrollX: 0, scrollY: 0 };
 
   function fitToWidth() {
     fitMode = 'fit';
+    stopWheelAnimation();
     setZoom(computeFitZoom());
   }
 
@@ -397,39 +455,51 @@ window.scrollTo({ left: panStart.scrollX - dx, top: panStart.scrollY - dy });
 // Mouse wheel zoom when in pan mode
 window.addEventListener('wheel', (e) => {
   if (!panMode) return; // only zoom in pan mode
-  e.preventDefault();
 
   const delta = normalizeWheelDeltaY(e);
   if (!delta) return;
 
+  e.preventDefault();
   fitMode = 'custom';
 
-  const rect = pageWrap.getBoundingClientRect();
-  const anchorClient = { x: e.clientX, y: e.clientY };
+  const now = performance.now();
+  const startNewGesture = !wheelGesture || (now - wheelGesture.idleAt) > GESTURE_IDLE_MS;
 
-  // compute target zoom instantly (no easing)
-  const targetZoom = clampZoom(zoom * Math.exp(-delta * WHEEL_ZOOM_SENSITIVITY));
+  if (startNewGesture) {
+    const rect = pageWrap.getBoundingClientRect();
+    const targetZoom = clampZoom(zoom * Math.exp(-delta * WHEEL_ZOOM_SENSITIVITY));
 
-  if (!rect || !rect.width || !rect.height) {
-    // no container metrics? just set it with animations OFF
-    setZoom(targetZoom, { animate: false });
-    return;
+    if (!rect || !rect.width || !rect.height) {
+      stopWheelAnimation();
+      setZoom(targetZoom, { animate: false });
+      return;
+    }
+
+    const anchorClient = { x: e.clientX, y: e.clientY };
+    const anchor = {
+      x: (anchorClient.x - rect.left) / zoom,
+      y: (anchorClient.y - rect.top) / zoom,
+    };
+
+    wheelGesture = {
+      anchor,
+      anchorClient,
+      docLeft: rect.left + window.scrollX,
+      docTop: rect.top + window.scrollY,
+      targetZoom,
+      idleAt: now,
+      lastTime: now,
+    };
+  } else {
+    wheelGesture.targetZoom = clampZoom(wheelGesture.targetZoom * Math.exp(-delta * WHEEL_ZOOM_SENSITIVITY));
   }
 
-  // lock the cursor point as the zoom anchor
-  const anchor = {
-    x: (anchorClient.x - rect.left) / zoom,
-    y: (anchorClient.y - rect.top) / zoom,
-  };
+  wheelGesture.idleAt = now;
 
-  // immediate jump — no duration, no animate
-  setZoom(targetZoom, {
-    animate: false,                // <-- key change
-    anchor,
-    anchorClient,
-    docLeft: rect.left + window.scrollX,
-    docTop: rect.top + window.scrollY,
-  });
+  if (!wheelRaf) {
+    wheelGesture.lastTime = now;
+    wheelRaf = requestAnimationFrame(wheelAnimate);
+  }
 }, { passive: false });
 
 
@@ -580,9 +650,21 @@ window.addEventListener('keydown', (e) => {
   }
 
   // Zoom controls
-  zoomRange.addEventListener('input', () => { fitMode = 'custom'; setZoom(Number(zoomRange.value) / 100); });
-  zoomInBtn.addEventListener('click', () => { fitMode = 'custom'; setZoom(zoom + 0.1); });
-  zoomOutBtn.addEventListener('click', () => { fitMode = 'custom'; setZoom(zoom - 0.1); });
+  zoomRange.addEventListener('input', () => {
+    fitMode = 'custom';
+    stopWheelAnimation();
+    setZoom(Number(zoomRange.value) / 100);
+  });
+  zoomInBtn.addEventListener('click', () => {
+    fitMode = 'custom';
+    stopWheelAnimation();
+    setZoom(zoom + 0.1);
+  });
+  zoomOutBtn.addEventListener('click', () => {
+    fitMode = 'custom';
+    stopWheelAnimation();
+    setZoom(zoom - 0.1);
+  });
   zoomFitBtn.addEventListener('click', fitToWidth);
 
   // Keyboard shortcuts: Ctrl/Cmd +/-, Ctrl/Cmd 0
@@ -592,6 +674,7 @@ window.addEventListener('keydown', (e) => {
     const zero = (e.key === '0');
     if ((e.ctrlKey || e.metaKey) && (plus || minus || zero)) {
       e.preventDefault();
+      stopWheelAnimation();
       if (plus) setZoom(zoom + 0.1);
       else if (minus) setZoom(zoom - 0.1);
       else if (zero) setZoom(1);
