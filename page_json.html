@@ -51,7 +51,7 @@
 
     <span class="zoom-wrap" title="Zoom (Ctrl + / Ctrl - / Ctrl 0)">
       <button id="zoomOut" aria-label="Zoom out">−</button>
-      <input id="zoomRange" type="range" min="50" max="300" step="10" value="100" />
+      <input id="zoomRange" type="range" min="50" max="300" step="1" value="100" />
       <button id="zoomIn" aria-label="Zoom in">+</button>
       <button id="zoomFit" title="Fit width">Fit</button>
       <span id="zoomLabel" class="meta">100%</span>
@@ -110,6 +110,20 @@
   let fitMode = 'fit'; // start in fit-to-width mode
   let zoomAnimation = null;
 
+  const ZOOM_MIN = 0.5;
+  const ZOOM_MAX = 3.0;
+  const WHEEL_LINE_HEIGHT = 16;
+  const WHEEL_ZOOM_SENSITIVITY = 0.0015;
+
+  const clampZoom = value => Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, value));
+
+  function normalizeWheelDeltaY(evt) {
+    if (!evt) return 0;
+    if (evt.deltaMode === 1) return evt.deltaY * WHEEL_LINE_HEIGHT; // DOM_DELTA_LINE
+    if (evt.deltaMode === 2) return evt.deltaY * (window.innerHeight || 1); // DOM_DELTA_PAGE
+    return evt.deltaY;
+  }
+
 
   // Pan/drag state
 let panMode = false;
@@ -153,8 +167,7 @@ let panStart = { x: 0, y: 0, scrollX: 0, scrollY: 0 };
 
 
   function setZoom(z, opts = {}) {
-    const min = 0.5, max = 3.0;
-    const targetZoom = Math.min(max, Math.max(min, z));
+    const targetZoom = clampZoom(z);
 
     const hasAnchor = opts.anchor && opts.anchorClient
       && Number.isFinite(opts.anchor.x) && Number.isFinite(opts.anchor.y)
@@ -384,27 +397,35 @@ window.scrollTo({ left: panStart.scrollX - dx, top: panStart.scrollY - dy });
 // Mouse wheel zoom when in pan mode
 window.addEventListener('wheel', (e) => {
   if (!panMode) return; // only zoom in pan mode
+
   e.preventDefault();
 
-  const delta = e.deltaY;
+  const delta = normalizeWheelDeltaY(e);
   if (!delta) return;
 
   fitMode = 'custom';
 
   const rect = pageWrap.getBoundingClientRect();
-  if (!rect || rect.width === 0 || rect.height === 0) {
-    setZoom(zoom + (delta < 0 ? 0.1 : -0.1), { animate: true });
+  const anchorClient = { x: e.clientX, y: e.clientY };
+
+  const targetZoom = clampZoom(zoom * Math.exp(-delta * WHEEL_ZOOM_SENSITIVITY));
+  const diff = Math.abs(targetZoom - zoom);
+  const animate = diff > 0.0005;
+  const duration = 160 + Math.min(240, diff * 400);
+
+  if (!rect || !rect.width || !rect.height) {
+    setZoom(targetZoom, { animate, duration });
     return;
   }
 
-  const anchorClient = { x: e.clientX, y: e.clientY };
   const anchor = {
     x: (anchorClient.x - rect.left) / zoom,
     y: (anchorClient.y - rect.top) / zoom,
   };
 
-  setZoom(zoom + (delta < 0 ? 0.1 : -0.1), {
-    animate: true,
+  setZoom(targetZoom, {
+    animate,
+    duration,
     anchor,
     anchorClient,
     docLeft: rect.left + window.scrollX,
