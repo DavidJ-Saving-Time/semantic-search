@@ -397,7 +397,6 @@ window.scrollTo({ left: panStart.scrollX - dx, top: panStart.scrollY - dy });
 // Mouse wheel zoom when in pan mode
 window.addEventListener('wheel', (e) => {
   if (!panMode) return; // only zoom in pan mode
-
   e.preventDefault();
 
   const delta = normalizeWheelDeltaY(e);
@@ -408,24 +407,24 @@ window.addEventListener('wheel', (e) => {
   const rect = pageWrap.getBoundingClientRect();
   const anchorClient = { x: e.clientX, y: e.clientY };
 
+  // compute target zoom instantly (no easing)
   const targetZoom = clampZoom(zoom * Math.exp(-delta * WHEEL_ZOOM_SENSITIVITY));
-  const diff = Math.abs(targetZoom - zoom);
-  const animate = diff > 0.0005;
-  const duration = 160 + Math.min(240, diff * 400);
 
   if (!rect || !rect.width || !rect.height) {
-    setZoom(targetZoom, { animate, duration });
+    // no container metrics? just set it with animations OFF
+    setZoom(targetZoom, { animate: false });
     return;
   }
 
+  // lock the cursor point as the zoom anchor
   const anchor = {
     x: (anchorClient.x - rect.left) / zoom,
     y: (anchorClient.y - rect.top) / zoom,
   };
 
+  // immediate jump — no duration, no animate
   setZoom(targetZoom, {
-    animate,
-    duration,
+    animate: false,                // <-- key change
     anchor,
     anchorClient,
     docLeft: rect.left + window.scrollX,
