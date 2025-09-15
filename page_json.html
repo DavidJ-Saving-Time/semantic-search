@@ -108,6 +108,7 @@
   // Zoom state
   let zoom = 1; // 1 = 100%
   let fitMode = 'fit'; // start in fit-to-width mode
+  let zoomAnimation = null;
 
 
   // Pan/drag state
@@ -151,14 +152,81 @@ let panStart = { x: 0, y: 0, scrollX: 0, scrollY: 0 };
   }
 
 
-  function setZoom(z) {
+  function setZoom(z, opts = {}) {
     const min = 0.5, max = 3.0;
-    zoom = Math.min(max, Math.max(min, z));
-    pageWrap.style.transform = `scale(${zoom})`;
-    zoomRange.value = Math.round(zoom * 100);
-    zoomLabel.textContent = `${Math.round(zoom * 100)}%`;
-    // No layout() here — transform scales image and overlay together.
-    updateContainerSize();
+    const targetZoom = Math.min(max, Math.max(min, z));
+
+    const hasAnchor = opts.anchor && opts.anchorClient
+      && Number.isFinite(opts.anchor.x) && Number.isFinite(opts.anchor.y)
+      && Number.isFinite(opts.anchorClient.x) && Number.isFinite(opts.anchorClient.y)
+      && Number.isFinite(opts.docLeft) && Number.isFinite(opts.docTop);
+
+    const anchorData = hasAnchor
+      ? {
+          anchor: opts.anchor,
+          anchorClient: opts.anchorClient,
+          docLeft: opts.docLeft,
+          docTop: opts.docTop,
+        }
+      : null;
+
+    const adjustScroll = (data, currentZoom) => {
+      const left = data.docLeft + data.anchor.x * currentZoom - data.anchorClient.x;
+      const top = data.docTop + data.anchor.y * currentZoom - data.anchorClient.y;
+      window.scrollTo({ left, top, behavior: 'auto' });
+    };
+
+    if (targetZoom === zoom) {
+      if (anchorData) adjustScroll(anchorData, zoom);
+      return zoom;
+    }
+
+    if (zoomAnimation && zoomAnimation.rafId) {
+      cancelAnimationFrame(zoomAnimation.rafId);
+      zoomAnimation = null;
+    }
+
+    const applyZoom = value => {
+      zoom = value;
+      pageWrap.style.transform = `scale(${zoom})`;
+      const sliderValue = Math.round(zoom * 100);
+      if (zoomRange) zoomRange.value = sliderValue;
+      if (zoomLabel) zoomLabel.textContent = `${sliderValue}%`;
+      // No layout() here — transform scales image and overlay together.
+      updateContainerSize();
+      if (anchorData) adjustScroll(anchorData, zoom);
+    };
+
+    if (opts.animate) {
+      const duration = Math.max(0, Number(opts.duration) || 200);
+      const startZoom = zoom;
+      const diff = targetZoom - startZoom;
+      const ease = typeof opts.easing === 'function'
+        ? opts.easing
+        : (t => 1 - Math.pow(1 - t, 3)); // easeOutCubic
+
+      const startTime = performance.now();
+      zoomAnimation = {};
+
+      const step = now => {
+        if (!zoomAnimation) return;
+        const t = Math.min(1, (now - startTime) / duration);
+        const eased = ease(t);
+        applyZoom(startZoom + diff * eased);
+        if (t < 1) {
+          zoomAnimation.rafId = requestAnimationFrame(step);
+        } else {
+          zoomAnimation = null;
+          applyZoom(targetZoom);
+        }
+      };
+
+      zoomAnimation.rafId = requestAnimationFrame(step);
+    } else {
+      applyZoom(targetZoom);
+    }
+
+    return zoom;
   }
 
 
@@ -317,12 +385,31 @@ window.scrollTo({ left: panStart.scrollX - dx, top: panStart.scrollY - dy });
 window.addEventListener('wheel', (e) => {
   if (!panMode) return; // only zoom in pan mode
   e.preventDefault();
+
   const delta = e.deltaY;
-  if (delta < 0) {
-    setZoom(zoom + 0.1); // zoom in
-  } else if (delta > 0) {
-    setZoom(zoom - 0.1); // zoom out
+  if (!delta) return;
+
+  fitMode = 'custom';
+
+  const rect = pageWrap.getBoundingClientRect();
+  if (!rect || rect.width === 0 || rect.height === 0) {
+    setZoom(zoom + (delta < 0 ? 0.1 : -0.1), { animate: true });
+    return;
   }
+
+  const anchorClient = { x: e.clientX, y: e.clientY };
+  const anchor = {
+    x: (anchorClient.x - rect.left) / zoom,
+    y: (anchorClient.y - rect.top) / zoom,
+  };
+
+  setZoom(zoom + (delta < 0 ? 0.1 : -0.1), {
+    animate: true,
+    anchor,
+    anchorClient,
+    docLeft: rect.left + window.scrollX,
+    docTop: rect.top + window.scrollY,
+  });
 }, { passive: false });
 
 
