@@ -2,9 +2,35 @@
 ini_set('display_errors', '0');
 setlocale(LC_NUMERIC, 'C');
 
+$PGHOST = getenv('PGHOST') ?: 'localhost';
+$PGPORT = getenv('PGPORT') ?: '5432';
+$PGDATABASE = getenv('PGDATABASE') ?: 'journals';
+$PGUSER = getenv('PGUSER') ?: 'journal_user';
+$PGPASSWORD = getenv('PGPASSWORD') ?: '';
+
 function h(?string $s): string
 {
     return htmlspecialchars($s ?? '', ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
+}
+
+function pg_pdo(string $host, string $port, string $db, string $user, string $pass, int $stmtTimeoutMs = 0): PDO
+{
+    $app = 'semantic_search_page_view';
+    $dsn = "pgsql:host={$host};port={$port};dbname={$db};options='--application_name={$app}'";
+    $pdo = new PDO($dsn, $user, $pass, [
+        PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
+        PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
+        PDO::ATTR_EMULATE_PREPARES => false,
+        PDO::ATTR_PERSISTENT => false,
+    ]);
+
+    if ($stmtTimeoutMs > 0) {
+        $pdo->exec('SET statement_timeout = ' . (int)$stmtTimeoutMs);
+    }
+
+    $pdo->exec('SET jit = off');
+
+    return $pdo;
 }
 
 $docData = [
@@ -28,84 +54,85 @@ $docData = [
 $httpStatus = 200;
 $pageTitle = 'Page Image + Text Overlay (JSON + Zoom)';
 
-$pageParamRaw = $_GET['page'] ?? '';
-$pageParam = is_string($pageParamRaw) ? trim($pageParamRaw) : '';
-if ($pageParam === '') {
+$pageParam = $_GET['page'] ?? '';
+if ($pageParam === '' || !preg_match('/^\d+$/', (string)$pageParam)) {
     $docData['error'] = 'Invalid or missing page identifier.';
     $httpStatus = 400;
 } else {
-    if (!preg_match('#^[A-Za-z0-9/_-]+(?:\.(?:json|webp))?$#', $pageParam)) {
-        $docData['error'] = 'Invalid or missing page identifier.';
-        $httpStatus = 400;
-    } else {
-        $pageBaseRaw = preg_replace('/\.(?:json|webp)$/i', '', $pageParam);
-        $pageBaseRaw = ltrim((string)$pageBaseRaw, '/');
+    $docData['pageId'] = (int)$pageParam;
 
-        if ($pageBaseRaw === '' || strpos($pageBaseRaw, '..') !== false) {
-            $docData['error'] = 'Invalid or missing page identifier.';
-            $httpStatus = 400;
+    try {
+        $pdo = pg_pdo($PGHOST, $PGPORT, $PGDATABASE, $PGUSER, $PGPASSWORD, 5000);
+
+        $stmt = $pdo->prepare("SELECT d.id, d.pubname, d.date, d.meta->>'journal' AS journal, d.meta->>'issue' AS issue, d.meta->>'title' AS title, d.meta->>'first_page' AS first_page_raw FROM docs d WHERE d.id = :id");
+        $stmt->execute([':id' => $docData['pageId']]);
+        $row = $stmt->fetch();
+
+        if (!$row) {
+            $docData['error'] = 'Requested page was not found.';
+            $httpStatus = 404;
         } else {
-            $dir = '';
-            $fileName = $pageBaseRaw;
-            $slashPos = strrpos($pageBaseRaw, '/');
-            if ($slashPos !== false) {
-                $dir = substr($pageBaseRaw, 0, $slashPos + 1);
-                $fileName = substr($pageBaseRaw, $slashPos + 1);
+            $journal = isset($row['journal']) ? trim((string)$row['journal'], '/') : '';
+            $issue = isset($row['issue']) ? trim((string)$row['issue'], '/') : '';
+            $firstPage = null;
+            $firstPageRaw = $row['first_page_raw'] ?? null;
+            if (is_string($firstPageRaw) && preg_match('/^\d+$/', $firstPageRaw)) {
+                $firstPage = (int)$firstPageRaw;
             }
 
-            if ($fileName === '' || !preg_match('/^(.*?)(\d+)$/', $fileName, $match)) {
-                $docData['error'] = 'Invalid or missing page identifier.';
-                $httpStatus = 400;
-            } else {
-                $prefix = $match[1];
-                $numberStr = $match[2];
-                $number = (int)$numberStr;
-                $digits = strlen($numberStr);
+            $docData['meta'] = [
+                'pubname' => $row['pubname'] ?? null,
+                'date' => $row['date'] ?? null,
+                'title' => $row['title'] ?? null,
+                'journal' => $journal,
+                'issue' => $issue,
+                'firstPage' => $firstPage,
+            ];
 
-                $baseDir = __DIR__;
-                $jsonPath = $baseDir . '/' . $pageBaseRaw . '.json';
-                $imagePath = $baseDir . '/' . $pageBaseRaw . '.webp';
+            if ($journal !== '' && $issue !== '' && $firstPage !== null) {
+                $pageSlug = 'page-' . str_pad((string)max(0, $firstPage), 4, '0', STR_PAD_LEFT);
+                $docData['pageBase'] = '/' . $journal . '/' . $issue . '/pages/' . $pageSlug;
+                $docData['pageLabel'] = $pageSlug;
 
-                if (!is_file($jsonPath) || !is_file($imagePath)) {
-                    $docData['error'] = 'Requested page was not found.';
-                    $httpStatus = 404;
-                } else {
-                    $docData['pageId'] = $pageBaseRaw;
-                    $docData['pageBase'] = $pageBaseRaw;
-                    $docData['pageLabel'] = $fileName;
-                    $docData['meta']['firstPage'] = $number > 0 ? $number : 0;
-
-                    $pageTitle = $fileName . ' – Page Viewer';
-
-                    $resolveNeighbor = function (int $delta) use ($dir, $prefix, $number, $digits, $baseDir) {
-                        $candidateNum = $number + $delta;
-                        if ($candidateNum < 0) {
-                            return null;
-                        }
-
-                        $candidateDigits = str_pad((string)$candidateNum, max(4, $digits), '0', STR_PAD_LEFT);
-                        $candidate = $dir . $prefix . $candidateDigits;
-                        $jsonCandidate = $baseDir . '/' . $candidate . '.json';
-                        $imageCandidate = $baseDir . '/' . $candidate . '.webp';
-
-                        if (is_file($jsonCandidate) && is_file($imageCandidate)) {
-                            return $candidate;
-                        }
-
-                        return null;
-                    };
-
-                    $prevId = $resolveNeighbor(-1);
-                    $nextId = $resolveNeighbor(1);
-                    if ($prevId !== null) {
-                        $docData['prevId'] = $prevId;
-                    }
-                    if ($nextId !== null) {
-                        $docData['nextId'] = $nextId;
-                    }
+                $pageTitleParts = [];
+                if (!empty($row['pubname'])) {
+                    $pageTitleParts[] = $row['pubname'];
                 }
+                if (!empty($row['date'])) {
+                    $pageTitleParts[] = $row['date'];
+                }
+                $pageTitleParts[] = $pageSlug;
+                $pageTitle = implode(' – ', array_filter($pageTitleParts));
+
+                $prevStmt = $pdo->prepare("SELECT d.id FROM docs d WHERE d.meta->>'journal' = :journal AND d.meta->>'issue' = :issue AND d.meta->>'first_page' ~ '^[0-9]+$' AND (d.meta->>'first_page')::int < :first_page ORDER BY (d.meta->>'first_page')::int DESC LIMIT 1");
+                $prevStmt->execute([
+                    ':journal' => $journal,
+                    ':issue' => $issue,
+                    ':first_page' => $firstPage,
+                ]);
+                $prevRow = $prevStmt->fetch();
+                if ($prevRow && isset($prevRow['id'])) {
+                    $docData['prevId'] = (int)$prevRow['id'];
+                }
+
+                $nextStmt = $pdo->prepare("SELECT d.id FROM docs d WHERE d.meta->>'journal' = :journal AND d.meta->>'issue' = :issue AND d.meta->>'first_page' ~ '^[0-9]+$' AND (d.meta->>'first_page')::int > :first_page ORDER BY (d.meta->>'first_page')::int ASC LIMIT 1");
+                $nextStmt->execute([
+                    ':journal' => $journal,
+                    ':issue' => $issue,
+                    ':first_page' => $firstPage,
+                ]);
+                $nextRow = $nextStmt->fetch();
+                if ($nextRow && isset($nextRow['id'])) {
+                    $docData['nextId'] = (int)$nextRow['id'];
+                }
+            } else {
+                $docData['error'] = 'This record is missing page asset information.';
+                $httpStatus = 422;
             }
         }
+    } catch (Throwable $e) {
+        $docData['error'] = 'Unable to load page details.';
+        $httpStatus = 500;
     }
 }
 
@@ -893,6 +920,8 @@ window.addEventListener('keydown', (e) => {
   });
 // encode each path segment; keep slashes
 const encPath = s => s.split('/').map(encodeURIComponent).join('/');
+// pad to 4 digits
+const pad4 = n => String(n).padStart(4, '0');
   // === Init ===
   (async function init() {
     if (!hasDocData) {
@@ -905,21 +934,16 @@ const encPath = s => s.split('/').map(encodeURIComponent).join('/');
       return;
     }
 
-    const base = String(docData.pageBase || '');
+    const base = docData.pageBase;
 
-    // Normalise trailing digits so "page-12" -> "page-0012"
-    const fixedBase = base.replace(/(\d+)$/, (match, digits) => {
-      const width = Math.max(4, digits.length);
-      const value = parseInt(digits, 10);
-      if (Number.isNaN(value)) {
-        return digits;
-      }
-      return String(value).padStart(width, '0');
-    });
+// ✅ parse to int, then pad — converts page-00012 -> page-0012
+const fixedBase = base.replace(/page-(\d+)$/, (_, num) =>
+  'page-' + pad4(parseInt(num, 10) || 0)
+);
 
-    const imageFile = encPath(fixedBase) + '.webp';
-    const textBase  = fixedBase.replace('/pages/', '/text/');
-    const jsonFile  = encPath(textBase) + '.json';
+const imageFile = encPath(fixedBase) + '.webp';
+const textBase  = fixedBase.replace('/pages/', '/text/');
+const jsonFile  = encPath(textBase) + '.json';
 
 
     img.src = imageFile;
