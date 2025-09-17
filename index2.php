@@ -432,18 +432,22 @@ usort($results, function ($a, $b) use ($scores) {
   <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css" rel="stylesheet">
 
   <style>
-    body { padding-top: 2rem; }
+
     .score-badge { font-variant-numeric: tabular-nums; }
     .snippet { white-space: pre-wrap; }
   </style>
 </head>
 <body>
-  <div class="container">
-    <header class="mb-4 d-flex align-items-center gap-2">
-      <i class="fa-solid fa-magnifying-glass fa-lg text-primary" aria-hidden="true"></i>
-      <h1 class="mb-0">Semantic Search</h1>
-    </header>
 
+  <header class="position-relative w-100 pb-4" 
+        style="background: url('images/backfrop.jpg') center center / cover no-repeat; height: 400px;">
+  <div class="position-absolute top-0 start-0 w-100 h-100" style="background: rgba(0,0,0,0.4);"></div>
+  <div class="container h-100 d-flex align-items-center justify-content-center position-relative">
+    <h1 class="text-white display-3 fw-bold">Nillas archive</h1>
+  </div>
+</header>
+
+<div class="container">
     <form method="post" class="mb-4" action="">
   <div class="row g-2 align-items-end">
     <!-- Query -->
