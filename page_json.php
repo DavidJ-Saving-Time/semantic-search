@@ -282,9 +282,6 @@ $docJson = json_encode($docData, JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | 
     const author = (meta.pubname && String(meta.pubname).trim()) ? String(meta.pubname).trim() : 'Unknown';
     const title = (meta.title && String(meta.title).trim()) ? String(meta.title).trim() : (docData && docData.pageLabel ? docData.pageLabel : 'Untitled page');
     const website = 'Nillas Archive';
-    const journal = (meta.journal && String(meta.journal).trim()) ? String(meta.journal).trim() : '';
-    const issue = (meta.issue && String(meta.issue).trim()) ? String(meta.issue).trim() : '';
-
     let year = 'n.d.';
     if (meta.date) {
       const dateStr = String(meta.date);
@@ -293,7 +290,6 @@ $docJson = json_encode($docData, JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | 
         year = match[1];
       }
     }
-
     const { origin, pathname, hash } = window.location;
     const url = `${origin}${pathname}${hash ?? ''}`;
     const now = new Date();
@@ -302,21 +298,7 @@ $docJson = json_encode($docData, JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | 
       month: 'long',
       year: 'numeric',
     });
-
-    const pageCitation = `${author}, '${title}', ${website}, (${year}), <${url}> [accessed ${accessed}].`;
-
-    const bookTitle = journal || title;
-    const detailParts = [];
-    if (issue) {
-      detailParts.push(issue);
-    }
-    if (year !== 'n.d.') {
-      detailParts.push(year);
-    }
-    const detailSuffix = detailParts.length ? ` (${detailParts.join(', ')})` : '';
-    const bookCitation = `${author}, ${bookTitle}${detailSuffix}.`;
-
-    return [pageCitation, bookCitation].join('\n');
+    return `${author}, '${title}', ${website}, (${year}), <${url}> [accessed ${accessed}].`;
   }
 
   if (citeBtn && citeModal && citeOutputEl) {
