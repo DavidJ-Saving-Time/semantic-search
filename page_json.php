@@ -64,7 +64,7 @@ if ($pageParam === '' || !preg_match('/^\d+$/', (string)$pageParam)) {
     try {
         $pdo = pg_pdo($PGHOST, $PGPORT, $PGDATABASE, $PGUSER, $PGPASSWORD, 5000);
 
-        $stmt = $pdo->prepare("SELECT d.id, d.pubname, d.date, d.meta->>'journal' AS journal, d.meta->>'issue' AS issue, d.meta->>'title' AS title, d.meta->>'first_page' AS first_page_raw FROM docs d WHERE d.id = :id");
+        $stmt = $pdo->prepare("SELECT d.id, d.source_file, d.pubname, d.date, d.meta->>'journal' AS journal, d.meta->>'issue' AS issue, d.meta->>'title' AS title, d.meta->>'first_page' AS first_page_raw FROM docs d WHERE d.id = :id");
         $stmt->execute([':id' => $docData['pageId']]);
         $row = $stmt->fetch();
 
@@ -89,11 +89,40 @@ if ($pageParam === '' || !preg_match('/^\d+$/', (string)$pageParam)) {
                 'firstPage' => $firstPage,
             ];
 
-            if ($journal !== '' && $issue !== '' && $firstPage !== null) {
-                $pageSlug = 'page-' . str_pad((string)max(0, $firstPage), 4, '0', STR_PAD_LEFT);
-                $docData['pageBase'] = '/' . $journal . '/' . $issue . '/pages/' . $pageSlug;
-                $docData['pageLabel'] = $pageSlug;
+            $pageSlug = null;
+            $pageDigits = 4;
+            $sourceDir = '';
+            $sourceExt = '';
+            $pageNumberFromSource = null;
 
+            $sourceFile = isset($row['source_file']) ? trim((string)$row['source_file']) : '';
+            if ($sourceFile !== '') {
+                $normalizedSource = ltrim($sourceFile, '/');
+                $pathInfo = pathinfo($normalizedSource);
+                $fileName = $pathInfo['filename'] ?? '';
+                if (is_string($fileName) && preg_match('/^page-(\d+)$/', $fileName, $m)) {
+                    $pageNumberFromSource = (int)$m[1];
+                    $pageDigits = max(1, strlen($m[1]));
+                    $pageSlug = $fileName;
+                }
+                $dirName = $pathInfo['dirname'] ?? '';
+                if ($dirName === '.' || $dirName === null) {
+                    $dirName = '';
+                }
+                $sourceDir = is_string($dirName) ? $dirName : '';
+                $sourceExt = isset($pathInfo['extension']) && is_string($pathInfo['extension']) ? $pathInfo['extension'] : '';
+            }
+
+            if ($pageSlug === null && $firstPage !== null) {
+                $pageSlug = 'page-' . str_pad((string)max(0, $firstPage), 4, '0', STR_PAD_LEFT);
+                $pageDigits = 4;
+            }
+
+            if ($pageSlug !== null) {
+                $docData['pageLabel'] = $pageSlug;
+            }
+
+            if ($pageSlug !== null) {
                 $pageTitleParts = [];
                 if (!empty($row['pubname'])) {
                     $pageTitleParts[] = $row['pubname'];
@@ -103,7 +132,70 @@ if ($pageParam === '' || !preg_match('/^\d+$/', (string)$pageParam)) {
                 }
                 $pageTitleParts[] = $pageSlug;
                 $pageTitle = implode(' – ', array_filter($pageTitleParts));
+            }
 
+            if ($pageSlug !== null && $sourceDir !== '') {
+                $pagesDir = preg_replace('#/text$#', '/pages', $sourceDir);
+                $docData['pageBase'] = '/' . ltrim($pagesDir . '/' . $pageSlug, '/');
+            } elseif ($journal !== '' && $issue !== '' && $pageSlug !== null) {
+                $docData['pageBase'] = '/' . $journal . '/' . $issue . '/pages/' . $pageSlug;
+            }
+
+            $attemptedAssetNav = false;
+
+            if ($pageNumberFromSource !== null) {
+                $attemptedAssetNav = true;
+                $formatSlug = function (int $n) use ($pageDigits): string {
+                    $n = max(0, $n);
+                    $numStr = (string)$n;
+                    $padLen = max($pageDigits, strlen($numStr));
+                    return 'page-' . str_pad($numStr, $padLen, '0', STR_PAD_LEFT);
+                };
+
+                $buildSource = function (int $pageNumber) use ($sourceDir, $sourceExt, $formatSlug): array {
+                    $slug = $formatSlug($pageNumber);
+                    $base = ($sourceDir !== '' ? $sourceDir . '/' : '') . $slug;
+                    $withExt = $sourceExt !== '' ? $base . '.' . $sourceExt : $base;
+                    $variants = [$withExt];
+                    $trimmed = ltrim($withExt, '/');
+                    if ($trimmed !== $withExt) {
+                        $variants[] = $trimmed;
+                    } else {
+                        $variants[] = '/' . $withExt;
+                    }
+                    return array_unique($variants);
+                };
+
+                $stmtBySource = $pdo->prepare('SELECT id FROM docs d WHERE d.source_file = :sf LIMIT 1');
+                $lookupBySource = function (int $pageNumber) use ($stmtBySource, $buildSource): ?int {
+                    foreach ($buildSource($pageNumber) as $candidate) {
+                        $stmtBySource->execute([':sf' => $candidate]);
+                        $found = $stmtBySource->fetch();
+                        $stmtBySource->closeCursor();
+                        if ($found && isset($found['id'])) {
+                            return (int)$found['id'];
+                        }
+                    }
+                    return null;
+                };
+
+                if ($pageNumberFromSource > 0) {
+                    $prevId = $lookupBySource($pageNumberFromSource - 1);
+                    if ($prevId !== null) {
+                        $docData['prevId'] = $prevId;
+                    }
+                }
+
+                $nextId = $lookupBySource($pageNumberFromSource + 1);
+                if ($nextId !== null) {
+                    $docData['nextId'] = $nextId;
+                }
+            }
+
+            if (!$attemptedAssetNav && ($journal === '' || $issue === '' || $pageSlug === null)) {
+                $docData['error'] = 'This record is missing page asset information.';
+                $httpStatus = 422;
+            } elseif (!$attemptedAssetNav && $journal !== '' && $issue !== '' && $firstPage !== null) {
                 $prevStmt = $pdo->prepare("SELECT d.id FROM docs d WHERE d.meta->>'journal' = :journal AND d.meta->>'issue' = :issue AND d.meta->>'first_page' ~ '^[0-9]+$' AND (d.meta->>'first_page')::int < :first_page ORDER BY (d.meta->>'first_page')::int DESC LIMIT 1");
                 $prevStmt->execute([
                     ':journal' => $journal,
@@ -125,7 +217,7 @@ if ($pageParam === '' || !preg_match('/^\d+$/', (string)$pageParam)) {
                 if ($nextRow && isset($nextRow['id'])) {
                     $docData['nextId'] = (int)$nextRow['id'];
                 }
-            } else {
+            } elseif (!$attemptedAssetNav) {
                 $docData['error'] = 'This record is missing page asset information.';
                 $httpStatus = 422;
             }
