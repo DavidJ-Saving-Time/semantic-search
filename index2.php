@@ -1,5 +1,3 @@
-
-
 <?php
 
 // index.php — Semantic search (inferred topics only) for web (Apache + PHP)
@@ -307,7 +305,12 @@ SELECT s.id,
        (SELECT w_sem FROM params)*s.sim + (SELECT w_topic FROM params)*s.topic_boost AS final_score,
        d.meta->>'issue' AS issue,
        d.meta->>'title' AS title,
+       d.meta->>'journal' AS journal,
        d.meta->>'anchor' AS anchor,
+       d.meta->>'genre' AS genre,
+       d.meta->>'topics' AS topics,
+       pubname AS pubname,
+       date as date,
        (d.meta->>'first_page')::int AS first_page
 FROM scored s
 JOIN docs d ON d.id = s.id
@@ -369,11 +372,7 @@ $anchors = is_array($anchors_raw) ? $anchors_raw : (json_decode($anchors_raw, tr
 // 2) Make a simple CSV string (M.P.,Lloyd’s,Lord John Russell,Jeremy Taylor)
 $csv = implode(',', array_map('trim', $anchors));
 
-// 3) Build your link with proper encoding of the query params
-$hrefILN = '/ILN/page_json.html?' . http_build_query([
-  'page' => '/' . ($row['issue'] ?? '') . '/pages/page-000' . ($row['first_page'] ?? ''),
-  'q'    => $csv,
-]);
+
 
 $venvPy = '/srv/http/calibre-nilla/reranker/.venv/bin/python';
 $cli    = '/srv/http/calibre-nilla/reranker/rerank_cli.py';
@@ -537,60 +536,86 @@ usort($results, function ($a, $b) use ($scores) {
               $anchors_raw = $row['anchor'] ?? '';
               $anchors = is_array($anchors_raw) ? $anchors_raw : (json_decode($anchors_raw, true) ?: []);
 
+              $genres_raw  = $row['genre']  ?? '[]';
+              $topics_raw  = $row['topics'] ?? '[]';
+
+              $genres = is_array($genres_raw) ? $genres_raw : (json_decode($genres_raw, true) ?: []);
+              $topics = is_array($topics_raw) ? $topics_raw : (json_decode($topics_raw, true) ?: []);
+
               // 2) Make a simple CSV string (M.P.,Lloyd’s,Lord John Russell,Jeremy Taylor)
               $csv = implode(',', array_map('trim', $anchors));
 
+
               // 3) Build your link with proper encoding of the query params
-              $hrefILN = 'page_json.html?' . http_build_query([
-                'page' => '/ILN/' . ($row['issue'] ?? '') . '/pages/page-000' . ($row['first_page'] ?? ''),
+              $hrefILN = '/semantic/page_json.html?' . http_build_query([
+                'page' =>  '/' . ($row['journal'] ?? '') . '/' . ($row['issue'] ?? '') . '/pages/page-000' . ($row['first_page'] ?? ''),
                 'q'    => $csv,
               ]);
 
               ?>
-            <li class="list-group-item">
-              <div class="d-flex justify-content-between align-items-start gap-3">
-                <div class="flex-grow-1">
-                  <div class="mb-1">
-                    <?=h($row['issue'] ?? '')?>
-                    <div class="btn-group btn-group-sm ms-2" role="group" aria-label="Result links">
-               
-                    <a class="btn btn-outline-secondary" target="_blank" rel="noopener"
-   href="<?= $hrefILN ?>"
 
->
-                        <i class="fa-solid fa-up-right-from-square me-1" aria-hidden="true"></i>Source
-                      </a>
-                      <a class="btn btn-outline-secondary js-view-md" target="_blank" rel="noopener" href="/EWJ_issues/<?=h($row['issue'] ?? '')?>.md">
-                        <i class="fa-regular fa-file-lines me-1" aria-hidden="true"></i>Full Summary
-                      </a>
-                    </div>
-                    <span class="text-body-secondary small ms-2">ID: <?=h((string)$row['id'])?></span>
-                  </div>
+<li class="list-group-item">
+  <div class="d-flex justify-content-between align-items-start gap-3">
 
-                  <h2 class="h5 mt-2 mb-1"><?=english_title_case($row['title']);?></h2>
-                  <div class="snippet"><?=h($row['snippet'] ?? '')?></div>
-                </div>
+    <!-- Left: thumbnail -->
+    <?php $page_num = str_pad((string)($row['first_page'] ?? ''), 4, '0', STR_PAD_LEFT); ?>
+    <a target="_blank" rel="noopener" href="<?= $hrefILN ?>">
+    <img src="/<?= rawurlencode($row['journal'] ?? '') ?>/<?= rawurlencode($row['issue'] ?? '') ?>/pages/page-<?= rawurlencode((string)$page_num) ?>_thumb.webp"
+     alt="Page <?= h($page_num) ?>"
+     style="width:150px; height:auto;" />
 
-                <div class="text-end">
-                  <div class="mb-1">
-                    <span class="badge text-bg-primary score-badge">
-                      <i class="fa-solid fa-star me-1" aria-hidden="true"></i>final <?=number_format((float)$row['final_score'], 4)?>
-                    </span>
-                  </div>
-                  <div class="mb-1">
-                    <span class="badge text-bg-light text-dark score-badge">
-                      <i class="fa-solid fa-wave-square me-1" aria-hidden="true"></i>sim <?=number_format((float)$row['sim'], 4)?>
-                    </span>
-                  </div>
-                  <div>
-                  <span class="badge text-bg-light text-dark score-badge">
-    <i class="fa-solid fa-layer-group me-1" aria-hidden="true"></i>
-    topic <?= number_format((float)($row['topic_display'] ?? $row['topic_boost'] ?? 0), 3) ?>
-  </span>
-                  </div>
-                </div>
-              </div>
-            </li>
+    <!-- Middle: main text -->
+    <div class="flex-grow-1">
+      <div class="h5 mt-2 mb-1">
+        <?=h($row['pubname'] ?? '')?> <?=h($row['date'] ?? '')?> - Page: <?=h($row['first_page'] ?? '') ?>
+        <div class="btn-group btn-group-sm ms-2" role="group" aria-label="Result links">
+          <a class="btn btn-outline-secondary" target="_blank" rel="noopener" href="<?= $hrefILN ?>">
+            <i class="fa-solid fa-up-right-from-square me-1" aria-hidden="true"></i>Source
+          </a>
+          <a class="btn btn-outline-secondary js-view-md" target="_blank" rel="noopener" 
+             href="/EWJ_issues/<?=h($row['issue'] ?? '')?>.md">
+            <i class="fa-regular fa-file-lines me-1" aria-hidden="true"></i>Full Summary
+          </a>
+        </div>
+        <span class="text-body-secondary small ms-2">ID: <?=h((string)$row['id'])?></span>
+      </div>
+
+      <h2 class="h5 mt-2 mb-1"><?=english_title_case($row['title']);?></h2>
+      <div class="snippet"><?=h($row['snippet'] ?? '')?></div>
+
+      <!-- Genre and topics -->
+      <div class="text-body-secondary small ms-2 mt-2">
+        Genre: <?=h(implode(', ', $genres))?>
+      </div>
+      <div class="text-body-secondary small ms-2 mt-1">
+        Topics: <?=h(implode(', ', $topics))?>
+      </div>
+    </div>
+
+    <!-- Right: aligned badges -->
+    <div class="text-end" style="min-width: 140px;">
+      <div class="mb-1">
+        <span class="badge text-bg-primary score-badge">
+          <i class="fa-solid fa-star me-1" aria-hidden="true"></i>
+          final <?=number_format((float)$row['final_score'], 4)?>
+        </span>
+      </div>
+      <div class="mb-1">
+        <span class="badge text-bg-light text-dark score-badge">
+          <i class="fa-solid fa-wave-square me-1" aria-hidden="true"></i>
+          sim <?=number_format((float)$row['sim'], 4)?>
+        </span>
+      </div>
+      <div>
+        <span class="badge text-bg-light text-dark score-badge">
+          <i class="fa-solid fa-layer-group me-1" aria-hidden="true"></i>
+          topic <?= number_format((float)($row['topic_display'] ?? $row['topic_boost'] ?? 0), 3) ?>
+        </span>
+      </div>
+    </div>
+
+  </div>
+</li>
           <?php endforeach; ?>
         </ol>
       <?php endif; ?>
