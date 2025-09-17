@@ -182,6 +182,8 @@ $docJson = json_encode($docData, JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | 
     .legend { color: var(--muted); font-size: 12px; margin-left: auto; }
     a { color: #9fd; }
     .error-banner { margin: calc(var(--header-h) + 1rem) 1rem 0; background: rgba(140, 30, 30, 0.7); border: 1px solid rgba(200, 80, 80, 0.9); border-radius: .6rem; padding: .75rem 1rem; color: #fdd; }
+    #citeModal .modal-dialog { max-width: 720px; }
+    #citeOutput { min-height: 200px; line-height: 1.6; }
   </style>
 </head>
 <body>
@@ -220,7 +222,7 @@ $docJson = json_encode($docData, JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | 
   <div id="toast" class="toast" hidden>0 matches</div>
 
   <div class="modal fade" id="citeModal" tabindex="-1" aria-labelledby="citeModalLabel" aria-hidden="true">
-    <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-dialog modal-dialog-centered modal-lg">
       <div class="modal-content bg-dark text-light">
         <div class="modal-header border-secondary">
           <h1 class="modal-title fs-5" id="citeModalLabel">Cite this page</h1>
@@ -228,7 +230,7 @@ $docJson = json_encode($docData, JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | 
         </div>
         <div class="modal-body">
           <label for="citeOutput" class="form-label">Oxford reference style</label>
-          <textarea id="citeOutput" class="form-control" rows="4" readonly></textarea>
+          <textarea id="citeOutput" class="form-control" rows="7" readonly></textarea>
         </div>
         <div class="modal-footer border-secondary">
           <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
@@ -316,7 +318,7 @@ $docJson = json_encode($docData, JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | 
     const detailSuffix = detailParts.length ? ` (${detailParts.join(', ')})` : '';
     const bookCitation = `${author}, ${bookTitle}${detailSuffix}.`;
 
-    return [pageCitation, bookCitation].join('\n');
+    return [pageCitation, bookCitation].join('\n\n');
   }
 
   if (citeBtn && citeModal && citeOutputEl) {
