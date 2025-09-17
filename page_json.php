@@ -290,8 +290,7 @@ $docJson = json_encode($docData, JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | 
         year = match[1];
       }
     }
-    const { origin, pathname, hash } = window.location;
-    const url = `${origin}${pathname}${hash ?? ''}`;
+    const url = window.location.href;
     const now = new Date();
     const accessed = now.toLocaleDateString('en-GB', {
       day: 'numeric',
