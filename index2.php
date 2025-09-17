@@ -182,15 +182,17 @@ $w_sim     = $DEF_W_SIM;
 $w_topic   = $DEF_W_TOP;
 $thresh    = $DEF_THRESH;
 $k         = $DEF_K;
-$results   = [];
-$errorMsg  = '';
-$timing    = ['embed_ms' => null, 'sql_ms' => null, 'cache' => 'miss'];
+$results        = [];
+$errorMsg       = '';
+$timing         = ['embed_ms' => null, 'sql_ms' => null, 'cache' => 'miss'];
+$rerankEnabled  = true;
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
 
     $q = isset($_POST['q']) ? (string)$_POST['q'] : '';
     $limit = clamp_int($_POST['limit'] ?? $DEF_LIMIT, 1, 50, $DEF_LIMIT);
+    $rerankEnabled = isset($_POST['rerank']);
 
     // Server-fixed knobs (hide UI for now; you can expose later)
     $w_sim   = $DEF_W_SIM;
@@ -378,43 +380,45 @@ $venvPy = '/srv/http/calibre-nilla/reranker/.venv/bin/python';
 $cli    = '/srv/http/calibre-nilla/reranker/rerank_cli.py';
 
 
-$docs = array_map(
-    fn ($r) => [
-    'id'   => (string)$r['id'],
-    'text' => mb_substr(($r['title'] ?? '') . ' — ' . ($r['snippet'] ?? ''), 0, 1200),
-  ],
-    $results
-);
+if ($rerankEnabled && !empty($results)) {
+    $docs = array_map(
+        fn ($r) => [
+        'id'   => (string)$r['id'],
+        'text' => mb_substr(($r['title'] ?? '') . ' — ' . ($r['snippet'] ?? ''), 0, 1200),
+      ],
+        $results
+    );
 
 
-$payload = json_encode(['query' => $q, 'documents' => $docs], JSON_UNESCAPED_UNICODE);
+    $payload = json_encode(['query' => $q, 'documents' => $docs], JSON_UNESCAPED_UNICODE);
 
-$descs = [['pipe','r'], ['pipe','w'], ['pipe','w']];
-$env = ['OMP_NUM_THREADS' => '1', 'MKL_NUM_THREADS' => '1'];
-$proc = proc_open($venvPy.' '.escapeshellarg($cli), $descs, $pipes, null, $env);
-fwrite($pipes[0], $payload);
-fclose($pipes[0]);
-$out = stream_get_contents($pipes[1]);
-fclose($pipes[1]);
-$err = stream_get_contents($pipes[2]);
-fclose($pipes[2]);
-proc_close($proc);
+    $descs = [['pipe','r'], ['pipe','w'], ['pipe','w']];
+    $env = ['OMP_NUM_THREADS' => '1', 'MKL_NUM_THREADS' => '1'];
+    $proc = proc_open($venvPy.' '.escapeshellarg($cli), $descs, $pipes, null, $env);
+    fwrite($pipes[0], $payload);
+    fclose($pipes[0]);
+    $out = stream_get_contents($pipes[1]);
+    fclose($pipes[1]);
+    $err = stream_get_contents($pipes[2]);
+    fclose($pipes[2]);
+    proc_close($proc);
 
-$j = json_decode($out, true);
-$scores = [];
-foreach (($j['scores'] ?? []) as $s) {
-    $scores[$s['id']] = $s['score'];
-}
-
-// sort by rerank score (desc), tie-break by your original final score
-usort($results, function ($a, $b) use ($scores) {
-    $sa = $scores[$a['id']] ?? -INF;
-    $sb = $scores[$b['id']] ?? -INF;
-    if ($sa === $sb) {
-        return ($b['final_score'] ?? 0) <=> ($a['final_score'] ?? 0);
+    $j = json_decode($out, true);
+    $scores = [];
+    foreach (($j['scores'] ?? []) as $s) {
+        $scores[$s['id']] = $s['score'];
     }
-    return $sb <=> $sa;
-});
+
+    // sort by rerank score (desc), tie-break by your original final score
+    usort($results, function ($a, $b) use ($scores) {
+        $sa = $scores[$a['id']] ?? -INF;
+        $sb = $scores[$b['id']] ?? -INF;
+        if ($sa === $sb) {
+            return ($b['final_score'] ?? 0) <=> ($a['final_score'] ?? 0);
+        }
+        return $sb <=> $sa;
+    });
+}
 
 ?>
 
@@ -465,7 +469,7 @@ usort($results, function ($a, $b) use ($scores) {
     </div>
 
     <!-- Publication -->
-    <div class="col-12 col-md-4">
+    <div class="col-12 col-md-3">
     <label for="pubname" class="form-label">Publication</label>
 <select name="pubname" id="pubname" class="form-select">
   <option value="" <?= $selectedPub === '' ? 'selected' : '' ?>>
@@ -493,8 +497,22 @@ usort($results, function ($a, $b) use ($scores) {
         value="<?= h((string)$limit) ?>">
     </div>
 
+    <!-- Reranker toggle -->
+    <div class="col-6 col-md-1 align-self-end">
+      <div class="form-check mb-0">
+        <input
+          class="form-check-input"
+          type="checkbox"
+          value="1"
+          id="rerank"
+          name="rerank"
+          <?= $rerankEnabled ? 'checked' : '' ?>>
+        <label class="form-check-label" for="rerank">Rerank</label>
+      </div>
+    </div>
+
     <!-- Submit -->
-    <div class="col-6 col-md-1 d-grid">
+    <div class="col-12 col-md-1 d-grid">
       <button type="submit" class="btn btn-primary">
         <i class="fa-solid fa-search me-1" aria-hidden="true"></i>
         Search
