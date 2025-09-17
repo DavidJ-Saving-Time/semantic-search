@@ -90,9 +90,26 @@ if ($pageParam === '' || !preg_match('/^\d+$/', (string)$pageParam)) {
             ];
 
             if ($journal !== '' && $issue !== '' && $firstPage !== null) {
-                $pageSlug = 'page-' . str_pad((string)max(0, $firstPage), 4, '0', STR_PAD_LEFT);
-                $docData['pageBase'] = '/' . $journal . '/' . $issue . '/pages/' . $pageSlug;
-                $docData['pageLabel'] = $pageSlug;
+                $pageSlug = sprintf('page-%04d', max(0, (int)$firstPage));
+
+                $pathSegments = array_filter(
+                    array_map(
+                        static function (string $segment): string {
+                            return trim($segment, '/');
+                        },
+                        [$journal, $issue, 'pages', $pageSlug]
+                    ),
+                    static function (string $segment): bool {
+                        return $segment !== '';
+                    }
+                );
+
+                $docData['pageBase'] = '/' . implode('/', $pathSegments);
+
+                $labelParts = array_filter([$journal, $issue, $pageSlug], static function ($part): bool {
+                    return is_string($part) && $part !== '';
+                });
+                $docData['pageLabel'] = $labelParts ? implode(' · ', $labelParts) : $pageSlug;
 
                 $pageTitleParts = [];
                 if (!empty($row['pubname'])) {
