@@ -13,6 +13,54 @@ function h(?string $s): string
     return htmlspecialchars($s ?? '', ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
 }
 
+/**
+ * Returns an array [slug, number] for a page based on the provided source file
+ * path and/or raw first-page metadata. Both values can be null when neither
+ * value yields a usable page identifier.
+ */
+function derive_page_identifier(?string $sourceFile, ?string $firstPageRaw): array
+{
+    $rawDigits = null;
+
+    if (is_string($sourceFile)) {
+        if (preg_match('/(page-\d+)/i', $sourceFile, $m)) {
+            // Prefer the file path as it reflects the actual asset slug.
+            $rawDigits = $m[1];
+        }
+    }
+
+    if ($rawDigits === null && is_string($firstPageRaw)) {
+        if (preg_match('/(\d+)/', $firstPageRaw, $m)) {
+            $rawDigits = 'page-' . $m[1];
+        }
+    }
+
+    if ($rawDigits === null) {
+        return [null, null];
+    }
+
+    if (!preg_match('/page-(\d+)/i', $rawDigits, $digitsMatch)) {
+        return [null, null];
+    }
+
+    $digits = $digitsMatch[1];
+    $normalizedDigits = ltrim($digits, '0');
+    if ($normalizedDigits === '') {
+        $normalizedDigits = '0';
+    }
+
+    $pageNumber = max(0, (int)$normalizedDigits);
+
+    $slugDigits = $digits;
+    if (strlen($slugDigits) < 4) {
+        $slugDigits = str_pad($normalizedDigits, 4, '0', STR_PAD_LEFT);
+    }
+
+    $slug = 'page-' . $slugDigits;
+
+    return [strtolower($slug), $pageNumber];
+}
+
 function pg_pdo(string $host, string $port, string $db, string $user, string $pass, int $stmtTimeoutMs = 0): PDO
 {
     $app = 'semantic_search_page_view';
@@ -48,6 +96,7 @@ $docData = [
         'journal' => null,
         'issue' => null,
         'firstPage' => null,
+        'pageNumber' => null,
     ],
 ];
 
@@ -64,7 +113,7 @@ if ($pageParam === '' || !preg_match('/^\d+$/', (string)$pageParam)) {
     try {
         $pdo = pg_pdo($PGHOST, $PGPORT, $PGDATABASE, $PGUSER, $PGPASSWORD, 5000);
 
-        $stmt = $pdo->prepare("SELECT d.id, d.pubname, d.date, d.meta->>'journal' AS journal, d.meta->>'issue' AS issue, d.meta->>'title' AS title, d.meta->>'first_page' AS first_page_raw FROM docs d WHERE d.id = :id");
+        $stmt = $pdo->prepare("SELECT d.id, d.source_file, d.pubname, d.date, d.meta->>'journal' AS journal, d.meta->>'issue' AS issue, d.meta->>'title' AS title, d.meta->>'first_page' AS first_page_raw FROM docs d WHERE d.id = :id");
         $stmt->execute([':id' => $docData['pageId']]);
         $row = $stmt->fetch();
 
@@ -80,6 +129,8 @@ if ($pageParam === '' || !preg_match('/^\d+$/', (string)$pageParam)) {
                 $firstPage = (int)$firstPageRaw;
             }
 
+            [$pageSlug, $pageNumber] = derive_page_identifier($row['source_file'] ?? null, $firstPageRaw ?? null);
+
             $docData['meta'] = [
                 'pubname' => $row['pubname'] ?? null,
                 'date' => $row['date'] ?? null,
@@ -87,10 +138,10 @@ if ($pageParam === '' || !preg_match('/^\d+$/', (string)$pageParam)) {
                 'journal' => $journal,
                 'issue' => $issue,
                 'firstPage' => $firstPage,
+                'pageNumber' => $pageNumber,
             ];
 
-            if ($journal !== '' && $issue !== '' && $firstPage !== null) {
-                $pageSlug = 'page-' . str_pad((string)max(0, $firstPage), 4, '0', STR_PAD_LEFT);
+            if ($journal !== '' && $issue !== '' && $pageSlug !== null) {
                 $docData['pageBase'] = '/' . $journal . '/' . $issue . '/pages/' . $pageSlug;
                 $docData['pageLabel'] = $pageSlug;
 
@@ -104,26 +155,43 @@ if ($pageParam === '' || !preg_match('/^\d+$/', (string)$pageParam)) {
                 $pageTitleParts[] = $pageSlug;
                 $pageTitle = implode(' – ', array_filter($pageTitleParts));
 
-                $prevStmt = $pdo->prepare("SELECT d.id FROM docs d WHERE d.meta->>'journal' = :journal AND d.meta->>'issue' = :issue AND d.meta->>'first_page' ~ '^[0-9]+$' AND (d.meta->>'first_page')::int < :first_page ORDER BY (d.meta->>'first_page')::int DESC LIMIT 1");
-                $prevStmt->execute([
+                $navStmt = $pdo->prepare("SELECT d.id, d.source_file, d.meta->>'first_page' AS first_page_raw FROM docs d WHERE d.meta->>'journal' = :journal AND d.meta->>'issue' = :issue");
+                $navStmt->execute([
                     ':journal' => $journal,
                     ':issue' => $issue,
-                    ':first_page' => $firstPage,
                 ]);
-                $prevRow = $prevStmt->fetch();
-                if ($prevRow && isset($prevRow['id'])) {
-                    $docData['prevId'] = (int)$prevRow['id'];
+
+                $navPages = [];
+                while ($navRow = $navStmt->fetch()) {
+                    [$navSlug, $navNumber] = derive_page_identifier($navRow['source_file'] ?? null, $navRow['first_page_raw'] ?? null);
+                    if ($navSlug === null || $navNumber === null) {
+                        continue;
+                    }
+                    $navPages[] = [
+                        'id' => (int)$navRow['id'],
+                        'num' => $navNumber,
+                    ];
                 }
 
-                $nextStmt = $pdo->prepare("SELECT d.id FROM docs d WHERE d.meta->>'journal' = :journal AND d.meta->>'issue' = :issue AND d.meta->>'first_page' ~ '^[0-9]+$' AND (d.meta->>'first_page')::int > :first_page ORDER BY (d.meta->>'first_page')::int ASC LIMIT 1");
-                $nextStmt->execute([
-                    ':journal' => $journal,
-                    ':issue' => $issue,
-                    ':first_page' => $firstPage,
-                ]);
-                $nextRow = $nextStmt->fetch();
-                if ($nextRow && isset($nextRow['id'])) {
-                    $docData['nextId'] = (int)$nextRow['id'];
+                if (!empty($navPages)) {
+                    usort($navPages, function (array $a, array $b): int {
+                        if ($a['num'] === $b['num']) {
+                            return $a['id'] <=> $b['id'];
+                        }
+                        return $a['num'] <=> $b['num'];
+                    });
+
+                    foreach ($navPages as $idx => $info) {
+                        if ($info['id'] === $docData['pageId']) {
+                            if ($idx > 0) {
+                                $docData['prevId'] = $navPages[$idx - 1]['id'];
+                            }
+                            if ($idx + 1 < count($navPages)) {
+                                $docData['nextId'] = $navPages[$idx + 1]['id'];
+                            }
+                            break;
+                        }
+                    }
                 }
             } else {
                 $docData['error'] = 'This record is missing page asset information.';
