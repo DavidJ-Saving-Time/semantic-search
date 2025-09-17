@@ -19,6 +19,11 @@ $PGDATABASE = getenv('PGDATABASE') ?: 'journals';
 $PGUSER = getenv('PGUSER') ?: 'journal_user';
 $PGPASSWORD = getenv('PGPASSWORD') ?: '';
 $OPENAI_MODEL = getenv('OPENAI_EMBED_MODEL') ?: 'text-embedding-3-large';
+$VOYAGE_API_KEY = getenv('VOYAGE_API_KEY') ?: '';
+$VOYAGE_RERANK_MODEL = getenv('VOYAGE_RERANK_MODEL') ?: 'rerank-2.5';
+
+// Optional Voyage timeout (env)
+$VOYAGE_TIMEOUT = (int)(getenv('VOYAGE_TIMEOUT_SECS') ?: 8);
 
 // Optional timeouts (env)
 $OPENAI_TIMEOUT = (int)(getenv('OPENAI_TIMEOUT_SECS') ?: 8);
@@ -93,6 +98,53 @@ function openai_embed(string $apiKey, string $text, string $model, int $timeoutS
         throw new RuntimeException('Invalid embedding response');
     }
     return $j['data'][0]['embedding'];
+}
+
+function voyage_rerank(string $apiKey, string $query, array $documents, string $model, int $timeoutSec = 8): array
+{
+    if ($apiKey === '') {
+        throw new RuntimeException('Voyage API key is not configured.');
+    }
+
+    $payload = json_encode([
+        'query' => $query,
+        'documents' => $documents,
+        'model' => $model,
+    ], JSON_UNESCAPED_UNICODE);
+
+    $ch = curl_init('https://api.voyageai.com/v1/rerank');
+    curl_setopt_array($ch, [
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_POST => true,
+        CURLOPT_HTTPHEADER => [
+            'Content-Type: application/json',
+            'Authorization: ' . 'Bearer ' . $apiKey,
+        ],
+        CURLOPT_POSTFIELDS => $payload,
+        CURLOPT_CONNECTTIMEOUT => 2,
+        CURLOPT_TIMEOUT => max(2, $timeoutSec),
+    ]);
+
+    $resp = curl_exec($ch);
+    $http = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    $err  = curl_error($ch);
+    curl_close($ch);
+
+    if ($resp === false || $http < 200 || $http >= 300) {
+        throw new RuntimeException('Voyage rerank request failed: HTTP ' . $http . ($err ? " ($err)" : ''));
+    }
+
+    $decoded = json_decode($resp, true);
+    if (!is_array($decoded)) {
+        throw new RuntimeException('Invalid Voyage rerank response.');
+    }
+
+    $items = $decoded['results'] ?? $decoded['data'] ?? null;
+    if (!is_array($items)) {
+        throw new RuntimeException('Voyage rerank response missing results.');
+    }
+
+    return $items;
 }
 
 // -------------------------- Postgres --------------------------
@@ -184,15 +236,21 @@ $thresh    = $DEF_THRESH;
 $k         = $DEF_K;
 $results        = [];
 $errorMsg       = '';
+$rerankNotice   = '';
 $timing         = ['embed_ms' => null, 'sql_ms' => null, 'cache' => 'miss'];
-$rerankEnabled  = true;
+$rerankMode     = 'local';
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
 
     $q = isset($_POST['q']) ? (string)$_POST['q'] : '';
     $limit = clamp_int($_POST['limit'] ?? $DEF_LIMIT, 1, 50, $DEF_LIMIT);
-    $rerankEnabled = isset($_POST['rerank']);
+    $postedMode = isset($_POST['rerank_mode']) ? (string)$_POST['rerank_mode'] : 'local';
+    if (in_array($postedMode, ['none', 'local', 'voyageai'], true)) {
+        $rerankMode = $postedMode;
+    } else {
+        $rerankMode = 'local';
+    }
 
     // Server-fixed knobs (hide UI for now; you can expose later)
     $w_sim   = $DEF_W_SIM;
@@ -380,44 +438,125 @@ $venvPy = '/srv/http/calibre-nilla/reranker/.venv/bin/python';
 $cli    = '/srv/http/calibre-nilla/reranker/rerank_cli.py';
 
 
-if ($rerankEnabled && !empty($results)) {
-    $docs = array_map(
-        fn ($r) => [
-        'id'   => (string)$r['id'],
-        'text' => mb_substr(($r['title'] ?? '') . ' — ' . ($r['snippet'] ?? ''), 0, 1200),
-      ],
-        $results
-    );
+if (!empty($results)) {
+    $effectiveRerankMode = $rerankMode;
 
-
-    $payload = json_encode(['query' => $q, 'documents' => $docs], JSON_UNESCAPED_UNICODE);
-
-    $descs = [['pipe','r'], ['pipe','w'], ['pipe','w']];
-    $env = ['OMP_NUM_THREADS' => '1', 'MKL_NUM_THREADS' => '1'];
-    $proc = proc_open($venvPy.' '.escapeshellarg($cli), $descs, $pipes, null, $env);
-    fwrite($pipes[0], $payload);
-    fclose($pipes[0]);
-    $out = stream_get_contents($pipes[1]);
-    fclose($pipes[1]);
-    $err = stream_get_contents($pipes[2]);
-    fclose($pipes[2]);
-    proc_close($proc);
-
-    $j = json_decode($out, true);
-    $scores = [];
-    foreach (($j['scores'] ?? []) as $s) {
-        $scores[$s['id']] = $s['score'];
+    if ($rerankMode === 'voyageai' && $VOYAGE_API_KEY === '') {
+        $rerankNotice = 'Voyage reranker selected but VOYAGE_API_KEY is not configured. Showing original order.';
+        $effectiveRerankMode = 'none';
     }
 
-    // sort by rerank score (desc), tie-break by your original final score
-    usort($results, function ($a, $b) use ($scores) {
-        $sa = $scores[$a['id']] ?? -INF;
-        $sb = $scores[$b['id']] ?? -INF;
-        if ($sa === $sb) {
-            return ($b['final_score'] ?? 0) <=> ($a['final_score'] ?? 0);
+    if ($effectiveRerankMode !== 'none') {
+        foreach ($results as $i => &$row) {
+            $row['_orig_index'] = $i;
         }
-        return $sb <=> $sa;
-    });
+        unset($row);
+
+        try {
+            $docTexts = [];
+            foreach ($results as $idx => $row) {
+                $docTexts[$idx] = mb_substr(($row['title'] ?? '') . ' — ' . ($row['snippet'] ?? ''), 0, 1200);
+            }
+
+            switch ($effectiveRerankMode) {
+                case 'local':
+                    $docs = [];
+                    foreach ($results as $idx => $row) {
+                        $docs[] = [
+                            'id'   => (string)($row['id'] ?? $idx),
+                            'text' => $docTexts[$idx] ?? '',
+                        ];
+                    }
+
+                    $payload = json_encode(['query' => $q, 'documents' => $docs], JSON_UNESCAPED_UNICODE);
+
+                    $descs = [['pipe', 'r'], ['pipe', 'w'], ['pipe', 'w']];
+                    $env = ['OMP_NUM_THREADS' => '1', 'MKL_NUM_THREADS' => '1'];
+                    $proc = proc_open($venvPy . ' ' . escapeshellarg($cli), $descs, $pipes, null, $env);
+                    if (!is_resource($proc)) {
+                        throw new RuntimeException('Failed to start local reranker process.');
+                    }
+
+                    fwrite($pipes[0], $payload);
+                    fclose($pipes[0]);
+                    $out = stream_get_contents($pipes[1]);
+                    fclose($pipes[1]);
+                    $err = stream_get_contents($pipes[2]);
+                    fclose($pipes[2]);
+                    proc_close($proc);
+
+                    $j = json_decode($out, true);
+                    if (!is_array($j) || !isset($j['scores']) || !is_array($j['scores'])) {
+                        throw new RuntimeException('Local reranker returned invalid response: ' . ($err ?: 'no stderr output'));
+                    }
+
+                    $scores = [];
+                    foreach ($j['scores'] as $s) {
+                        if (!isset($s['id']) || !isset($s['score'])) {
+                            continue;
+                        }
+                        $scores[(string)$s['id']] = (float)$s['score'];
+                    }
+
+                    usort($results, function ($a, $b) use ($scores) {
+                        $sa = $scores[(string)($a['id'] ?? '')] ?? -INF;
+                        $sb = $scores[(string)($b['id'] ?? '')] ?? -INF;
+                        if ($sa == $sb) {
+                            return ((float)($b['final_score'] ?? 0)) <=> ((float)($a['final_score'] ?? 0));
+                        }
+                        return $sb <=> $sa;
+                    });
+                    break;
+
+                case 'voyageai':
+                    $voyageResults = voyage_rerank($VOYAGE_API_KEY, $q, array_values($docTexts), $VOYAGE_RERANK_MODEL, $VOYAGE_TIMEOUT);
+
+                    $scoresByIndex = [];
+                    foreach ($voyageResults as $item) {
+                        $idx = null;
+                        if (isset($item['index'])) {
+                            $idx = (int)$item['index'];
+                        } elseif (isset($item['document']['index'])) {
+                            $idx = (int)$item['document']['index'];
+                        }
+
+                        if ($idx === null) {
+                            continue;
+                        }
+
+                        $score = $item['relevance_score'] ?? $item['score'] ?? $item['relevanceScore'] ?? null;
+                        if ($score === null) {
+                            continue;
+                        }
+
+                        $scoresByIndex[$idx] = (float)$score;
+                    }
+
+                    usort($results, function ($a, $b) use ($scoresByIndex) {
+                        $ia = (int)($a['_orig_index'] ?? -1);
+                        $ib = (int)($b['_orig_index'] ?? -1);
+                        $sa = $scoresByIndex[$ia] ?? -INF;
+                        $sb = $scoresByIndex[$ib] ?? -INF;
+                        if ($sa == $sb) {
+                            return ((float)($b['final_score'] ?? 0)) <=> ((float)($a['final_score'] ?? 0));
+                        }
+                        return $sb <=> $sa;
+                    });
+                    break;
+            }
+        } catch (Throwable $e) {
+            if ($rerankNotice === '') {
+                $modeLabel = $effectiveRerankMode === 'voyageai' ? 'Voyage reranker' : 'Local reranker';
+                $rerankNotice = $modeLabel . ' failed; showing original order.';
+            }
+            error_log('[semantic_search] rerank (' . $effectiveRerankMode . '): ' . $e->getMessage());
+        }
+
+        foreach ($results as &$row) {
+            unset($row['_orig_index']);
+        }
+        unset($row);
+    }
 }
 
 ?>
@@ -497,18 +636,14 @@ if ($rerankEnabled && !empty($results)) {
         value="<?= h((string)$limit) ?>">
     </div>
 
-    <!-- Reranker toggle -->
-    <div class="col-6 col-md-1 align-self-end">
-      <div class="form-check mb-0">
-        <input
-          class="form-check-input"
-          type="checkbox"
-          value="1"
-          id="rerank"
-          name="rerank"
-          <?= $rerankEnabled ? 'checked' : '' ?>>
-        <label class="form-check-label" for="rerank">Rerank</label>
-      </div>
+    <!-- Reranker -->
+    <div class="col-6 col-md-2">
+      <label for="rerank_mode" class="form-label">Reranker</label>
+      <select class="form-select" id="rerank_mode" name="rerank_mode">
+        <option value="voyageai" <?= $rerankMode === 'voyageai' ? 'selected' : '' ?>>Voyage AI (rerank-2.5)</option>
+        <option value="local" <?= $rerankMode === 'local' ? 'selected' : '' ?>>Local reranker</option>
+        <option value="none" <?= $rerankMode === 'none' ? 'selected' : '' ?>>None</option>
+      </select>
     </div>
 
     <!-- Submit -->
@@ -544,6 +679,12 @@ if ($rerankEnabled && !empty($results)) {
     <?php if ($errorMsg): ?>
       <div class="alert alert-danger" role="alert">
         <i class="fa-solid fa-triangle-exclamation me-1" aria-hidden="true"></i><?=h($errorMsg)?>
+      </div>
+    <?php endif; ?>
+
+    <?php if ($_SERVER['REQUEST_METHOD'] === 'POST' && !$errorMsg && $rerankNotice): ?>
+      <div class="alert alert-warning" role="alert">
+        <i class="fa-solid fa-circle-info me-1" aria-hidden="true"></i><?=h($rerankNotice)?>
       </div>
     <?php endif; ?>
 
