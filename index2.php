@@ -547,10 +547,11 @@ usort($results, function ($a, $b) use ($scores) {
 
 
               // 3) Build your link with proper encoding of the query params
-              $hrefILN = '/semantic/page_json.html?' . http_build_query([
-                'page' =>  '/' . ($row['journal'] ?? '') . '/' . ($row['issue'] ?? '') . '/pages/page-000' . ($row['first_page'] ?? ''),
-                'q'    => $csv,
-              ]);
+              $paramsILN = ['q' => $csv];
+              if (isset($row['id'])) {
+                  $paramsILN['page'] = (int)$row['id'];
+              }
+              $hrefILN = '/semantic/page_json.php?' . http_build_query($paramsILN);
 
               ?>
 
