@@ -145,6 +145,7 @@ $docJson = json_encode($docData, JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | 
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title><?=h($pageTitle)?></title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
   <style>
     :root {
       --accent: rgba(255, 200, 0, 0.35);
@@ -189,6 +190,7 @@ $docJson = json_encode($docData, JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | 
     <button id="btnFind" title="Find">Find</button>
     <button id="btnClear" title="Clear">Clear</button>
     <label id="lblDebug" title="Toggle debug outlines"><input id="chkDebug" type="checkbox" /> Debug</label>
+    <button id="btnCite" title="Cite">Cite</button>
 
 
     <span class="zoom-wrap" title="Zoom (Ctrl + / Ctrl - / Ctrl 0)">
@@ -217,11 +219,31 @@ $docJson = json_encode($docData, JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | 
 
   <div id="toast" class="toast" hidden>0 matches</div>
 
+  <div class="modal fade" id="citeModal" tabindex="-1" aria-labelledby="citeModalLabel" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered">
+      <div class="modal-content bg-dark text-light">
+        <div class="modal-header border-secondary">
+          <h1 class="modal-title fs-5" id="citeModalLabel">Cite this page</h1>
+          <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
+        </div>
+        <div class="modal-body">
+          <label for="citeOutput" class="form-label">Oxford reference style</label>
+          <textarea id="citeOutput" class="form-control" rows="4" readonly></textarea>
+        </div>
+        <div class="modal-footer border-secondary">
+          <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <footer>
   <button id="prevPage">⟨ Prev</button>
   <span id="pageLabel">page-0001</span>
   <button id="nextPage">Next ⟩</button>
 </footer>
+
+  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
 
   <script>
   const docData = <?=$docJson?>;
@@ -246,9 +268,45 @@ $docJson = json_encode($docData, JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | 
   const pageLabelEl = document.getElementById('pageLabel');
   const prevBtn = document.getElementById('prevPage');
   const nextBtn = document.getElementById('nextPage');
+  const citeBtn = document.getElementById('btnCite');
+  const citeOutputEl = document.getElementById('citeOutput');
+  const citeModalEl = document.getElementById('citeModal');
+  const citeModal = (typeof bootstrap !== 'undefined' && citeModalEl) ? new bootstrap.Modal(citeModalEl) : null;
 
   if (pageLabelEl) {
     pageLabelEl.textContent = (docData && docData.pageLabel) ? docData.pageLabel : 'page-0001';
+  }
+
+  function formatCitation() {
+    const meta = docData && docData.meta ? docData.meta : {};
+    const author = (meta.pubname && String(meta.pubname).trim()) ? String(meta.pubname).trim() : 'Unknown';
+    const title = (meta.title && String(meta.title).trim()) ? String(meta.title).trim() : (docData && docData.pageLabel ? docData.pageLabel : 'Untitled page');
+    const website = 'Nillas Archive';
+    let year = 'n.d.';
+    if (meta.date) {
+      const dateStr = String(meta.date);
+      const match = dateStr.match(/(\d{4})/);
+      if (match) {
+        year = match[1];
+      }
+    }
+    const url = window.location.href;
+    const now = new Date();
+    const accessed = now.toLocaleDateString('en-GB', {
+      day: 'numeric',
+      month: 'long',
+      year: 'numeric',
+    });
+    return `${author}, '${title}', ${website}, (${year}), <${url}> [accessed ${accessed}].`;
+  }
+
+  if (citeBtn && citeModal && citeOutputEl) {
+    citeBtn.addEventListener('click', () => {
+      citeOutputEl.value = formatCitation();
+      citeModal.show();
+      citeOutputEl.focus();
+      citeOutputEl.select();
+    });
   }
 
   // === State ===
