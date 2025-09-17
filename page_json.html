@@ -1,150 +1,9 @@
-<?php
-ini_set('display_errors', '0');
-setlocale(LC_NUMERIC, 'C');
-
-$PGHOST = getenv('PGHOST') ?: 'localhost';
-$PGPORT = getenv('PGPORT') ?: '5432';
-$PGDATABASE = getenv('PGDATABASE') ?: 'journals';
-$PGUSER = getenv('PGUSER') ?: 'journal_user';
-$PGPASSWORD = getenv('PGPASSWORD') ?: '';
-
-function h(?string $s): string
-{
-    return htmlspecialchars($s ?? '', ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
-}
-
-function pg_pdo(string $host, string $port, string $db, string $user, string $pass, int $stmtTimeoutMs = 0): PDO
-{
-    $app = 'semantic_search_page_view';
-    $dsn = "pgsql:host={$host};port={$port};dbname={$db};options='--application_name={$app}'";
-    $pdo = new PDO($dsn, $user, $pass, [
-        PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
-        PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
-        PDO::ATTR_EMULATE_PREPARES => false,
-        PDO::ATTR_PERSISTENT => false,
-    ]);
-
-    if ($stmtTimeoutMs > 0) {
-        $pdo->exec('SET statement_timeout = ' . (int)$stmtTimeoutMs);
-    }
-
-    $pdo->exec('SET jit = off');
-
-    return $pdo;
-}
-
-$docData = [
-    'error' => null,
-    'pageId' => null,
-    'pageBase' => null,
-    'pageLabel' => null,
-    'prevId' => null,
-    'nextId' => null,
-    'searchQuery' => isset($_GET['q']) ? (string)$_GET['q'] : '',
-    'meta' => [
-        'pubname' => null,
-        'date' => null,
-        'title' => null,
-        'journal' => null,
-        'issue' => null,
-        'firstPage' => null,
-    ],
-];
-
-$httpStatus = 200;
-$pageTitle = 'Page Image + Text Overlay (JSON + Zoom)';
-
-$pageParam = $_GET['page'] ?? '';
-if ($pageParam === '' || !preg_match('/^\d+$/', (string)$pageParam)) {
-    $docData['error'] = 'Invalid or missing page identifier.';
-    $httpStatus = 400;
-} else {
-    $docData['pageId'] = (int)$pageParam;
-
-    try {
-        $pdo = pg_pdo($PGHOST, $PGPORT, $PGDATABASE, $PGUSER, $PGPASSWORD, 5000);
-
-        $stmt = $pdo->prepare("SELECT d.id, d.pubname, d.date, d.meta->>'journal' AS journal, d.meta->>'issue' AS issue, d.meta->>'title' AS title, d.meta->>'first_page' AS first_page_raw FROM docs d WHERE d.id = :id");
-        $stmt->execute([':id' => $docData['pageId']]);
-        $row = $stmt->fetch();
-
-        if (!$row) {
-            $docData['error'] = 'Requested page was not found.';
-            $httpStatus = 404;
-        } else {
-            $journal = isset($row['journal']) ? trim((string)$row['journal'], '/') : '';
-            $issue = isset($row['issue']) ? trim((string)$row['issue'], '/') : '';
-            $firstPage = null;
-            $firstPageRaw = $row['first_page_raw'] ?? null;
-            if (is_string($firstPageRaw) && preg_match('/^\d+$/', $firstPageRaw)) {
-                $firstPage = (int)$firstPageRaw;
-            }
-
-            $docData['meta'] = [
-                'pubname' => $row['pubname'] ?? null,
-                'date' => $row['date'] ?? null,
-                'title' => $row['title'] ?? null,
-                'journal' => $journal,
-                'issue' => $issue,
-                'firstPage' => $firstPage,
-            ];
-
-            if ($journal !== '' && $issue !== '' && $firstPage !== null) {
-                $pageSlug = 'page-' . str_pad((string)max(0, $firstPage), 4, '0', STR_PAD_LEFT);
-                $docData['pageBase'] = '/' . $journal . '/' . $issue . '/pages/' . $pageSlug;
-                $docData['pageLabel'] = $pageSlug;
-
-                $pageTitleParts = [];
-                if (!empty($row['pubname'])) {
-                    $pageTitleParts[] = $row['pubname'];
-                }
-                if (!empty($row['date'])) {
-                    $pageTitleParts[] = $row['date'];
-                }
-                $pageTitleParts[] = $pageSlug;
-                $pageTitle = implode(' – ', array_filter($pageTitleParts));
-
-                $prevStmt = $pdo->prepare("SELECT d.id FROM docs d WHERE d.meta->>'journal' = :journal AND d.meta->>'issue' = :issue AND d.meta->>'first_page' ~ '^[0-9]+$' AND (d.meta->>'first_page')::int < :first_page ORDER BY (d.meta->>'first_page')::int DESC LIMIT 1");
-                $prevStmt->execute([
-                    ':journal' => $journal,
-                    ':issue' => $issue,
-                    ':first_page' => $firstPage,
-                ]);
-                $prevRow = $prevStmt->fetch();
-                if ($prevRow && isset($prevRow['id'])) {
-                    $docData['prevId'] = (int)$prevRow['id'];
-                }
-
-                $nextStmt = $pdo->prepare("SELECT d.id FROM docs d WHERE d.meta->>'journal' = :journal AND d.meta->>'issue' = :issue AND d.meta->>'first_page' ~ '^[0-9]+$' AND (d.meta->>'first_page')::int > :first_page ORDER BY (d.meta->>'first_page')::int ASC LIMIT 1");
-                $nextStmt->execute([
-                    ':journal' => $journal,
-                    ':issue' => $issue,
-                    ':first_page' => $firstPage,
-                ]);
-                $nextRow = $nextStmt->fetch();
-                if ($nextRow && isset($nextRow['id'])) {
-                    $docData['nextId'] = (int)$nextRow['id'];
-                }
-            } else {
-                $docData['error'] = 'This record is missing page asset information.';
-                $httpStatus = 422;
-            }
-        }
-    } catch (Throwable $e) {
-        $docData['error'] = 'Unable to load page details.';
-        $httpStatus = 500;
-    }
-}
-
-http_response_code($httpStatus);
-$docJson = json_encode($docData, JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
-?>
 <!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title><?=h($pageTitle)?></title>
+  <title>Page Image + Text Overlay (JSON + Zoom)</title>
   <style>
     :root {
       --accent: rgba(255, 200, 0, 0.35);
@@ -180,7 +39,6 @@ $docJson = json_encode($docData, JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | 
     .toast { position: fixed; right: 12px; bottom: 12px; background: rgba(20,28,38,.8); border: 1px solid #334; border-radius: .6rem; padding: .5rem .7rem; color: var(--muted); font-size: 12px; z-index: 20; }
     .legend { color: var(--muted); font-size: 12px; margin-left: auto; }
     a { color: #9fd; }
-    .error-banner { margin: calc(var(--header-h) + 1rem) 1rem 0; background: rgba(140, 30, 30, 0.7); border: 1px solid rgba(200, 80, 80, 0.9); border-radius: .6rem; padding: .75rem 1rem; color: #fdd; }
   </style>
 </head>
 <body>
@@ -211,10 +69,6 @@ $docJson = json_encode($docData, JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | 
     </div>
   </main>
 
-  <?php if (!empty($docData['error'])): ?>
-    <div class="error-banner"><?=h($docData['error'])?></div>
-  <?php endif; ?>
-
   <div id="toast" class="toast" hidden>0 matches</div>
 
   <footer>
@@ -224,9 +78,6 @@ $docJson = json_encode($docData, JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | 
 </footer>
 
   <script>
-  const docData = <?=$docJson?>;
-  const hasDocData = !!(docData && !docData.error && docData.pageBase);
-
   // === Elements ===
   const pageWrap = document.getElementById('pageWrap');
   const img = document.getElementById('pageImg');
@@ -243,13 +94,6 @@ $docJson = json_encode($docData, JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | 
   const zoomFitBtn = document.getElementById('zoomFit');
   const zoomLabel = document.getElementById('zoomLabel');
   const headerEl = document.querySelector('header');
-  const pageLabelEl = document.getElementById('pageLabel');
-  const prevBtn = document.getElementById('prevPage');
-  const nextBtn = document.getElementById('nextPage');
-
-  if (pageLabelEl) {
-    pageLabelEl.textContent = (docData && docData.pageLabel) ? docData.pageLabel : 'page-0001';
-  }
 
   // === State ===
   let pdfW = null, pdfH = null;
@@ -760,26 +604,23 @@ window.addEventListener('keydown', (e) => {
 
 
   function changePage(offset) {
-    if (!hasDocData) return;
-    const targetId = offset < 0 ? docData.prevId : docData.nextId;
-    if (!targetId) return;
+  const base = getParam('page') || 'page-0001';
+  const match = base.match(/^(.*?)(\d+)$/);
+  if (!match) return;
+  const prefix = match[1];
+  const num = parseInt(match[2], 10) + offset;
+  const width = match[2].length;
+  const nextBase = prefix + String(Math.max(1, num)).padStart(width, '0');
 
-    const usp = new URLSearchParams(location.search);
-    usp.set('page', String(targetId));
-    location.search = '?' + usp.toString();
-  }
-
-if (!docData || !docData.prevId) {
-  prevBtn.disabled = true;
-} else {
-  prevBtn.addEventListener('click', () => changePage(-1));
+  const usp = new URLSearchParams(location.search);
+  usp.set('page', nextBase); // preserve q and others
+  location.search = '?' + usp.toString();
 }
 
-if (!docData || !docData.nextId) {
-  nextBtn.disabled = true;
-} else {
-  nextBtn.addEventListener('click', () => changePage(1));
-}
+document.getElementById('pageLabel').textContent = getParam('page') || 'page-0001';
+
+document.getElementById('prevPage').addEventListener('click', () => changePage(-1));
+document.getElementById('nextPage').addEventListener('click', () => changePage(1));
 
 
 window.addEventListener('keydown', (e) => {
@@ -845,17 +686,7 @@ const encPath = s => s.split('/').map(encodeURIComponent).join('/');
 const pad4 = n => String(n).padStart(4, '0');
   // === Init ===
   (async function init() {
-    if (!hasDocData) {
-      if (docData && docData.error) {
-        console.error(docData.error);
-        showToast(docData.error);
-      }
-      prevBtn.disabled = true;
-      nextBtn.disabled = true;
-      return;
-    }
-
-    const base = docData.pageBase;
+    const base = getParam('page') || '/ILN/.../pages/page-0001';
 
 // ✅ parse to int, then pad — converts page-00012 -> page-0012
 const fixedBase = base.replace(/page-(\d+)$/, (_, num) =>
@@ -872,12 +703,12 @@ const jsonFile  = encPath(textBase) + '.json';
       await loadJSON(jsonFile);
     } catch (err) {
       console.error(err);
-      showToast(err.message);
+      alert(err.message);
       return;
     }
 
     // Support multi-term q: comma-separated
-    const rawQ = docData.searchQuery || getParam('q');
+    const rawQ = getParam('q');
     if (rawQ) {
       input.value = rawQ;
       highlightAny(rawQ);
