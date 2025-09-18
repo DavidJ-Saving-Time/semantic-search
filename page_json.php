@@ -37,6 +37,8 @@ if ($pageParam === '' || !preg_match('/^\d+$/', $pageParam)) {
 }
 
 $pageRow = null;
+$tocRows = [];
+$tocError = '';
 if ($error === '') {
     $connStr = sprintf(
         "host=%s port=%s dbname=%s user=%s password=%s",
@@ -111,6 +113,36 @@ SQL;
             $pageRow = pg_fetch_assoc($res) ?: null;
             if (!$pageRow) {
                 $error = 'Page not found.';
+            }
+        }
+
+        if ($error === '' && $pageRow) {
+            $tocSql = <<<SQL
+WITH cur_issue AS (
+  SELECT issue FROM pages WHERE page_id = $1
+)
+SELECT
+  p.page_id,
+  p.page,
+  COUNT(d.id)                           AS article_count,
+  MIN(d.id) FILTER (WHERE d.id IS NOT NULL) AS first_doc_id,
+  string_agg(d.meta->>'title', ' • ' ORDER BY d.id)
+    AS titles
+FROM pages p
+LEFT JOIN docs d
+  ON d.issue = p.issue AND d.page = p.page
+WHERE p.issue = (SELECT issue FROM cur_issue)
+GROUP BY p.page_id, p.page
+ORDER BY p.page;
+SQL;
+
+            $tocRes = pg_query_params($pgconn, $tocSql, [$pageId]);
+            if ($tocRes === false) {
+                $tocError = 'Failed to load table of contents.';
+            } else {
+                while ($row = pg_fetch_assoc($tocRes)) {
+                    $tocRows[] = $row;
+                }
             }
         }
 
@@ -221,6 +253,12 @@ if ($error !== '' && $pageMeta === null) {
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Page Image + Text Overlay (JSON + Zoom)</title>
+  <link
+    rel="stylesheet"
+    href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css"
+    integrity="sha384-QWTKZyjpPEjISv5WaRU9OFeRpok6YctnYmDr5pNlyT2bRjXh0JMhjY6hW+ALEwIH"
+    crossorigin="anonymous"
+  />
   <style>
     :root {
       --accent: rgba(255, 200, 0, 0.35);
@@ -256,6 +294,10 @@ if ($error !== '' && $pageMeta === null) {
     .toast { position: fixed; right: 12px; bottom: 12px; background: rgba(20,28,38,.8); border: 1px solid #334; border-radius: .6rem; padding: .5rem .7rem; color: var(--muted); font-size: 12px; z-index: 20; }
     .legend { color: var(--muted); font-size: 12px; margin-left: auto; }
     a { color: #9fd; }
+    .modal-content { background: #0f1621; color: var(--fg); border: 1px solid #223; }
+    .modal-header, .modal-footer { border-color: #223; }
+    .modal-title { font-weight: 600; }
+    .table-dark a { color: inherit; }
   </style>
 </head>
 <body<?= $error !== '' ? ' data-error="' . h($error) . '"' : '' ?>>
@@ -264,6 +306,7 @@ if ($error !== '' && $pageMeta === null) {
     <button id="btnFind" title="Find">Find</button>
     <button id="btnClear" title="Clear">Clear</button>
     <label id="lblDebug" title="Toggle debug outlines"><input id="chkDebug" type="checkbox" /> Debug</label>
+    <button id="btnToc" title="Open table of contents" data-bs-toggle="modal" data-bs-target="#tocModal">Contents</button>
 
 
     <span class="zoom-wrap" title="Zoom (Ctrl + / Ctrl - / Ctrl 0)">
@@ -288,6 +331,75 @@ if ($error !== '' && $pageMeta === null) {
 
   <div id="toast" class="toast" hidden>0 matches</div>
 
+  <div class="modal fade" id="tocModal" tabindex="-1" aria-labelledby="tocModalLabel" aria-hidden="true">
+    <div class="modal-dialog modal-lg modal-dialog-scrollable">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h5 class="modal-title" id="tocModalLabel">Table of Contents</h5>
+          <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
+        </div>
+        <div class="modal-body">
+          <?php if ($tocError !== ''): ?>
+            <div class="alert alert-danger mb-0" role="alert"><?= h($tocError) ?></div>
+          <?php elseif (!$tocRows): ?>
+            <p class="text-muted mb-0">No table of contents available.</p>
+          <?php else: ?>
+            <div class="table-responsive">
+              <table class="table table-dark table-hover align-middle mb-0">
+                <thead>
+                  <tr>
+                    <th scope="col">Page</th>
+                    <th scope="col">Articles</th>
+                    <th scope="col">Titles</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <?php foreach ($tocRows as $row): ?>
+                    <?php
+                      $rowPageId = isset($row['page_id']) && $row['page_id'] !== '' ? (int)$row['page_id'] : null;
+                      $rowPageLabel = '';
+                      if (isset($row['page']) && $row['page'] !== null && $row['page'] !== '') {
+                          $rowPageLabel = trim((string)$row['page']);
+                      } elseif ($rowPageId !== null) {
+                          $rowPageLabel = 'ID ' . $rowPageId;
+                      }
+                      $rowCount = isset($row['article_count']) && $row['article_count'] !== null ? (int)$row['article_count'] : 0;
+                      $titlesRaw = isset($row['titles']) && $row['titles'] !== null ? trim((string)$row['titles']) : '';
+                      $rowLink = $rowPageId !== null ? ('?page_id=' . urlencode((string)$rowPageId)) : '#';
+                      $isCurrent = $rowPageId !== null && $rowPageId === $pageId;
+                    ?>
+                    <tr<?= $isCurrent ? ' class="table-active"' : '' ?>>
+                      <td>
+                        <?php if ($rowPageId !== null): ?>
+                          <a href="<?= h($rowLink) ?>" class="text-reset text-decoration-none<?= $isCurrent ? ' fw-semibold' : '' ?>">
+                            <?= h($rowPageLabel !== '' ? $rowPageLabel : (string)$rowPageId) ?>
+                          </a>
+                        <?php else: ?>
+                          <?= h($rowPageLabel !== '' ? $rowPageLabel : '—') ?>
+                        <?php endif; ?>
+                      </td>
+                      <td><?= h((string)$rowCount) ?></td>
+                      <td>
+                        <?php if ($titlesRaw !== ''): ?>
+                          <?= h($titlesRaw) ?>
+                        <?php else: ?>
+                          <span class="text-muted">—</span>
+                        <?php endif; ?>
+                      </td>
+                    </tr>
+                  <?php endforeach; ?>
+                </tbody>
+              </table>
+            </div>
+          <?php endif; ?>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-outline-light" data-bs-dismiss="modal">Close</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <footer>
   <button id="prevPage"<?= $prevDisabled ? ' disabled' : '' ?>>⟨ Prev</button>
   <span id="pageLabel"><?=h($pageLabel)?></span>
@@ -295,6 +407,11 @@ if ($error !== '' && $pageMeta === null) {
 </footer>
 
   <script id="pageData" type="application/json"><?= $pageMeta ? json_encode($pageMeta, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) : 'null' ?></script>
+  <script
+    src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"
+    integrity="sha384-YvpcrYf0tY3lHB60NNkmXc5s9fDVZLESaAA55NDzOxhy9GkcIdslK1eN7N6jIeHz"
+    crossorigin="anonymous"
+  ></script>
   <script>
   // === Elements ===
   const pageWrap = document.getElementById('pageWrap');
