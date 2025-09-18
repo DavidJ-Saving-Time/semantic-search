@@ -714,8 +714,8 @@ if (!empty($results)) {
 
 
               // 3) Build your link with proper encoding of the query params
-              $hrefILN = '/semantic/page_json.html?' . http_build_query([
-                'page' =>  '/' . ($row['journal'] ?? '') . '/' . ($row['issue'] ?? '') . '/pages/page-000' . ($row['first_page'] ?? ''),
+              $hrefILN = '/semantic/page_json.php?' . http_build_query([
+                'page' =>  (string)($row['id'] ?? ''),
                 'q'    => $csv,
               ]);
 

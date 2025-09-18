@@ -1,3 +1,178 @@
+<?php
+ini_set('display_errors', '0');
+
+function h(?string $s): string
+{
+    return htmlspecialchars($s ?? '', ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
+}
+
+function encode_path(string $path): string
+{
+    $trimmed = trim($path, '/');
+    if ($trimmed === '') {
+        return '';
+    }
+    $parts = explode('/', $trimmed);
+    $encoded = [];
+    foreach ($parts as $part) {
+        $encoded[] = rawurlencode($part);
+    }
+    return '/' . implode('/', $encoded);
+}
+
+$PGHOST = getenv('PGHOST') ?: 'localhost';
+$PGPORT = getenv('PGPORT') ?: '5432';
+$PGDATABASE = getenv('PGDATABASE') ?: 'journals';
+$PGUSER = getenv('PGUSER') ?: 'journal_user';
+$PGPASSWORD = getenv('PGPASSWORD') ?: '';
+
+$pageParam = $_GET['page'] ?? '';
+$pageId = null;
+$error = '';
+
+if ($pageParam === '' || !preg_match('/^\d+$/', $pageParam)) {
+    $error = 'Invalid or missing page id.';
+} else {
+    $pageId = (int)$pageParam;
+}
+
+$doc = null;
+if ($error === '') {
+    $connStr = sprintf(
+        "host=%s port=%s dbname=%s user=%s password=%s",
+        $PGHOST,
+        $PGPORT,
+        $PGDATABASE,
+        $PGUSER,
+        $PGPASSWORD
+    );
+
+    $pgconn = @pg_connect($connStr);
+    if ($pgconn === false) {
+        $error = 'Database connection failed.';
+    } else {
+        $sql = <<<SQL
+SELECT
+  d.id,
+  d.source_file,
+  d.meta->>'journal' AS journal,
+  d.meta->>'issue' AS issue,
+  (d.meta->>'first_page')::int AS first_page,
+  d.page,
+  (
+    SELECT id
+    FROM docs
+    WHERE issue = d.issue
+      AND (page, id) > (d.page, d.id)
+    ORDER BY page ASC, id ASC
+    LIMIT 1
+  ) AS next_id,
+  (
+    SELECT id
+    FROM docs
+    WHERE issue = d.issue
+      AND (page, id) < (d.page, d.id)
+    ORDER BY page DESC, id DESC
+    LIMIT 1
+  ) AS prev_id
+FROM docs d
+WHERE d.id = $1
+LIMIT 1;
+SQL;
+
+        $res = pg_query_params($pgconn, $sql, [$pageId]);
+        if ($res === false) {
+            $error = 'Failed to load page metadata.';
+        } else {
+            $doc = pg_fetch_assoc($res) ?: null;
+            if (!$doc) {
+                $error = 'Page not found.';
+            }
+        }
+
+        pg_close($pgconn);
+    }
+}
+
+$pageMeta = null;
+$pageLabel = $error ?: 'Loading…';
+$prevDisabled = true;
+$nextDisabled = true;
+
+if ($error === '' && $doc) {
+    $journal = $doc['journal'] ?? '';
+    $issue = $doc['issue'] ?? '';
+    $sourceFile = $doc['source_file'] ?? '';
+    $pageNumber = null;
+
+    if (isset($doc['page']) && $doc['page'] !== null && $doc['page'] !== '') {
+        $pageNumber = (int)$doc['page'];
+    } elseif (isset($doc['first_page']) && $doc['first_page'] !== null && $doc['first_page'] !== '') {
+        $pageNumber = (int)$doc['first_page'];
+    }
+
+    $pad = null;
+    if ($pageNumber !== null && $pageNumber > 0) {
+        $pad = str_pad((string)$pageNumber, 4, '0', STR_PAD_LEFT);
+    }
+
+    $imageRaw = null;
+    $jsonRaw = null;
+
+    if ($journal !== '' && $issue !== '' && $pad !== null) {
+        $jsonRaw = '/' . $journal . '/' . $issue . '/text/page-' . $pad . '.json';
+        $imageRaw = '/' . $journal . '/' . $issue . '/pages/page-' . $pad . '.webp';
+    }
+
+    if ($jsonRaw === null && $sourceFile !== '') {
+        $jsonRaw = '/' . ltrim($sourceFile, '/');
+    }
+
+    if ($imageRaw === null && $jsonRaw !== null) {
+        if (preg_match('/\/text\/(page-[^\/]+)\.json$/', $jsonRaw)) {
+            $imageRaw = preg_replace('/\/text\/(page-[^\/]+)\.json$/', '/pages/$1.webp', $jsonRaw);
+        }
+    }
+
+    $jsonPath = $jsonRaw !== null ? encode_path($jsonRaw) : null;
+    $imagePath = $imageRaw !== null ? encode_path($imageRaw) : null;
+
+    if ($imagePath === null || $jsonPath === null) {
+        $error = 'Page assets missing.';
+    } else {
+        $prevId = isset($doc['prev_id']) && $doc['prev_id'] !== null ? (int)$doc['prev_id'] : null;
+        $nextId = isset($doc['next_id']) && $doc['next_id'] !== null ? (int)$doc['next_id'] : null;
+
+        $pageLabel = $pad !== null ? 'page-' . $pad : ('ID ' . $pageId);
+        $prevDisabled = $prevId === null;
+        $nextDisabled = $nextId === null;
+
+        $pageMeta = [
+            'pageId' => $pageId,
+            'pageLabel' => $pageLabel,
+            'imagePath' => $imagePath,
+            'jsonPath' => $jsonPath,
+            'prevId' => $prevId,
+            'nextId' => $nextId,
+            'issue' => $issue !== '' ? $issue : null,
+            'journal' => $journal !== '' ? $journal : null,
+        ];
+    }
+}
+
+$statusCode = 200;
+if ($error !== '' && $pageMeta === null) {
+    if ($error === 'Invalid or missing page id.') {
+        $statusCode = 400;
+    } elseif ($error === 'Page not found.') {
+        $statusCode = 404;
+    } else {
+        $statusCode = 500;
+    }
+    http_response_code($statusCode);
+    $pageLabel = $error;
+}
+?>
 <!doctype html>
 <html lang="en">
 <head>
@@ -41,7 +216,7 @@
     a { color: #9fd; }
   </style>
 </head>
-<body>
+<body<?= $error !== '' ? ' data-error="' . h($error) . '"' : '' ?>>
   <header>
     <input id="q" type="search" placeholder="Find: 'the bay,my house in'" autocomplete="off" />
     <button id="btnFind" title="Find">Find</button>
@@ -72,11 +247,12 @@
   <div id="toast" class="toast" hidden>0 matches</div>
 
   <footer>
-  <button id="prevPage">⟨ Prev</button>
-  <span id="pageLabel">page-0001</span>
-  <button id="nextPage">Next ⟩</button>
+  <button id="prevPage"<?= $prevDisabled ? ' disabled' : '' ?>>⟨ Prev</button>
+  <span id="pageLabel"><?=h($pageLabel)?></span>
+  <button id="nextPage"<?= $nextDisabled ? ' disabled' : '' ?>>Next ⟩</button>
 </footer>
 
+  <script id="pageData" type="application/json"><?= $pageMeta ? json_encode($pageMeta, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) : 'null' ?></script>
   <script>
   // === Elements ===
   const pageWrap = document.getElementById('pageWrap');
@@ -94,6 +270,22 @@
   const zoomFitBtn = document.getElementById('zoomFit');
   const zoomLabel = document.getElementById('zoomLabel');
   const headerEl = document.querySelector('header');
+  const prevBtn = document.getElementById('prevPage');
+  const nextBtn = document.getElementById('nextPage');
+  const pageLabelEl = document.getElementById('pageLabel');
+  const pageDataEl = document.getElementById('pageData');
+  let pageData = null;
+  try {
+    pageData = pageDataEl ? JSON.parse(pageDataEl.textContent) : null;
+  } catch (err) {
+    console.error('Failed to parse page metadata', err);
+  }
+  const pageError = document.body.getAttribute('data-error') || '';
+
+  if (pageError && toast) {
+    toast.textContent = pageError;
+    toast.hidden = false;
+  }
 
   // === State ===
   let pdfW = null, pdfH = null;
@@ -603,31 +795,46 @@ window.addEventListener('keydown', (e) => {
   }
 
 
-  function changePage(offset) {
-  const base = getParam('page') || 'page-0001';
-  const match = base.match(/^(.*?)(\d+)$/);
-  if (!match) return;
-  const prefix = match[1];
-  const num = parseInt(match[2], 10) + offset;
-  const width = match[2].length;
-  const nextBase = prefix + String(Math.max(1, num)).padStart(width, '0');
+  function goToPageId(targetId) {
+    if (!targetId) return;
+    const usp = new URLSearchParams(location.search);
+    usp.set('page', targetId);
+    location.search = '?' + usp.toString();
+  }
 
-  const usp = new URLSearchParams(location.search);
-  usp.set('page', nextBase); // preserve q and others
-  location.search = '?' + usp.toString();
-}
+  function updateNavButtons() {
+    if (prevBtn) prevBtn.disabled = !(pageData && pageData.prevId);
+    if (nextBtn) nextBtn.disabled = !(pageData && pageData.nextId);
+  }
 
-document.getElementById('pageLabel').textContent = getParam('page') || 'page-0001';
+  if (pageLabelEl) {
+    if (pageData && pageData.pageLabel) {
+      pageLabelEl.textContent = pageData.pageLabel;
+    } else if (pageError) {
+      pageLabelEl.textContent = pageError;
+    }
+  }
 
-document.getElementById('prevPage').addEventListener('click', () => changePage(-1));
-document.getElementById('nextPage').addEventListener('click', () => changePage(1));
+  updateNavButtons();
 
+  if (prevBtn) {
+    prevBtn.addEventListener('click', () => {
+      if (pageData && pageData.prevId) goToPageId(pageData.prevId);
+    });
+  }
 
-window.addEventListener('keydown', (e) => {
-  if (['INPUT','TEXTAREA'].includes((e.target.tagName || ''))) return;
-  if (e.key === 'ArrowLeft') { e.preventDefault(); changePage(-1); }
-  if (e.key === 'ArrowRight') { e.preventDefault(); changePage(1); }
-});
+  if (nextBtn) {
+    nextBtn.addEventListener('click', () => {
+      if (pageData && pageData.nextId) goToPageId(pageData.nextId);
+    });
+  }
+
+  window.addEventListener('keydown', (e) => {
+    if (['INPUT','TEXTAREA'].includes((e.target.tagName || ''))) return;
+    if (!pageData) return;
+    if (e.key === 'ArrowLeft' && pageData.prevId) { e.preventDefault(); goToPageId(pageData.prevId); }
+    if (e.key === 'ArrowRight' && pageData.nextId) { e.preventDefault(); goToPageId(pageData.nextId); }
+  });
 
 
   // === Events ===
@@ -680,27 +887,19 @@ window.addEventListener('keydown', (e) => {
       else if (zero) setZoom(1);
     }
   });
-// encode each path segment; keep slashes
-const encPath = s => s.split('/').map(encodeURIComponent).join('/');
-// pad to 4 digits
-const pad4 = n => String(n).padStart(4, '0');
   // === Init ===
   (async function init() {
-    const base = getParam('page') || '/ILN/.../pages/page-0001';
+    if (!pageData || !pageData.imagePath || !pageData.jsonPath) {
+      if (pageError) {
+        console.error(pageError);
+        if (pageLabelEl) pageLabelEl.textContent = pageError;
+      }
+      return;
+    }
 
-// ✅ parse to int, then pad — converts page-00012 -> page-0012
-const fixedBase = base.replace(/page-(\d+)$/, (_, num) =>
-  'page-' + pad4(parseInt(num, 10) || 0)
-);
-
-const imageFile = encPath(fixedBase) + '.webp';
-const textBase  = fixedBase.replace('/pages/', '/text/');
-const jsonFile  = encPath(textBase) + '.json';
-
-
-    img.src = imageFile;
+    img.src = pageData.imagePath;
     try {
-      await loadJSON(jsonFile);
+      await loadJSON(pageData.jsonPath);
     } catch (err) {
       console.error(err);
       alert(err.message);
