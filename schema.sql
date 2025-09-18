@@ -50,7 +50,13 @@ CREATE TABLE public.docs (
     pubname text,
     date date,
     genre text[],
-    embedding_hv public.halfvec(3072) GENERATED ALWAYS AS ((embedding)::public.halfvec(3072)) STORED
+    embedding_hv public.halfvec(3072) GENERATED ALWAYS AS ((embedding)::public.halfvec(3072)) STORED,
+    page integer GENERATED ALWAYS AS (
+CASE
+    WHEN ((meta ->> 'first_page'::text) ~ '^\d+$'::text) THEN ((meta ->> 'first_page'::text))::integer
+    ELSE NULL::integer
+END) STORED,
+    issue text GENERATED ALWAYS AS ((meta ->> 'issue'::text)) STORED
 );
 
 

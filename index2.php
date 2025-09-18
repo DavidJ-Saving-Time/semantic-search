@@ -582,19 +582,20 @@ if (!empty($results)) {
 </head>
 <body>
 
-  <header class="position-relative w-100 pb-4" 
+<header class="position-relative w-100 pb-4" 
         style="background: url('images/backfrop.jpg') center center / cover no-repeat; height: 400px;">
   <div class="position-absolute top-0 start-0 w-100 h-100" style="background: rgba(0,0,0,0.4);"></div>
-  <div class="container h-100 d-flex align-items-center justify-content-center position-relative">
+  <div class="container h-100 d-flex flex-column align-items-center justify-content-center position-relative text-center">
     <h1 class="text-white display-3 fw-bold">Nillas archive</h1>
+    <p class="text-white fs-4 fst-italic">News from the Victorian Era</p>
   </div>
 </header>
 
 <div class="container">
-    <form method="post" class="mb-4" action="">
-  <div class="row g-2 align-items-end">
+<form method="post" class="mb-4 mt-4" action="">
+  <div class="d-flex flex-wrap align-items-end gap-2">
     <!-- Query -->
-    <div class="col-12 col-md-6">
+    <div class="flex-grow-1">
       <label for="q" class="form-label">Query</label>
       <input
         type="text"
@@ -608,23 +609,23 @@ if (!empty($results)) {
     </div>
 
     <!-- Publication -->
-    <div class="col-12 col-md-3">
-    <label for="pubname" class="form-label">Publication</label>
-<select name="pubname" id="pubname" class="form-select">
-  <option value="" <?= $selectedPub === '' ? 'selected' : '' ?>>
-    All (<?= number_format($total) ?>)
-  </option>
-  <?php foreach ($pubnames as $p): ?>
-    <?php $cnt = $counts[$p] ?? 0; ?>
-    <option value="<?= h($p) ?>" <?= strcasecmp($selectedPub, $p) === 0 ? 'selected' : '' ?>>
-      <?= h($p) ?> (<?= number_format($cnt) ?>)
-    </option>
-  <?php endforeach; ?>
-</select>
+    <div>
+      <label for="pubname" class="form-label">Publication</label>
+      <select name="pubname" id="pubname" class="form-select">
+        <option value="" <?= $selectedPub === '' ? 'selected' : '' ?>>
+          All (<?= number_format($total) ?>)
+        </option>
+        <?php foreach ($pubnames as $p): ?>
+          <?php $cnt = $counts[$p] ?? 0; ?>
+          <option value="<?= h($p) ?>" <?= strcasecmp($selectedPub, $p) === 0 ? 'selected' : '' ?>>
+            <?= h($p) ?> (<?= number_format($cnt) ?>)
+          </option>
+        <?php endforeach; ?>
+      </select>
     </div>
 
     <!-- Results -->
-    <div class="col-6 col-md-1">
+    <div>
       <label for="limit" class="form-label">Results</label>
       <input
         type="number"
@@ -637,7 +638,7 @@ if (!empty($results)) {
     </div>
 
     <!-- Reranker -->
-    <div class="col-6 col-md-2">
+    <div>
       <label for="rerank_mode" class="form-label">Reranker</label>
       <select class="form-select" id="rerank_mode" name="rerank_mode">
         <option value="voyageai" <?= $rerankMode === 'voyageai' ? 'selected' : '' ?>>Voyage AI (rerank-2.5)</option>
@@ -647,7 +648,7 @@ if (!empty($results)) {
     </div>
 
     <!-- Submit -->
-    <div class="col-12 col-md-1 d-grid">
+    <div class="d-grid">
       <button type="submit" class="btn btn-primary">
         <i class="fa-solid fa-search me-1" aria-hidden="true"></i>
         Search
@@ -655,20 +656,23 @@ if (!empty($results)) {
     </div>
   </div>
 
-  <div class="form-text mt-2">
-    Using inferred topics only. Weights:
-    w<sub>sim</sub>=<?=$w_sim?>, w<sub>topic</sub>=<?=$w_topic?>, thresh=<?=$thresh?>, k=<?=$k?>.
+  <div class="form-text mt-2 d-flex align-items-center flex-wrap gap-2">
+    <span>
+      Using inferred topics only. Weights:
+      w<sub>sim</sub>=<?=$w_sim?>, w<sub>topic</sub>=<?=$w_topic?>,
+      thresh=<?=$thresh?>, k=<?=$k?>.
+    </span>
     <?php if ($timing['embed_ms'] !== null || $timing['sql_ms'] !== null): ?>
-      <span class="ms-2 badge text-bg-secondary">
+      <span class="badge text-bg-secondary">
         <i class="fa-solid fa-rotate me-1" aria-hidden="true"></i>cache: <?=$timing['cache']?>
       </span>
       <?php if ($timing['embed_ms'] !== null): ?>
-        <span class="ms-1 badge text-bg-secondary">
+        <span class="badge text-bg-secondary">
           <i class="fa-solid fa-microchip me-1" aria-hidden="true"></i>embed: <?=$timing['embed_ms']?>ms
         </span>
       <?php endif; ?>
       <?php if ($timing['sql_ms'] !== null): ?>
-        <span class="ms-1 badge text-bg-secondary">
+        <span class="badge text-bg-secondary">
           <i class="fa-solid fa-database me-1" aria-hidden="true"></i>sql: <?=$timing['sql_ms']?>ms
         </span>
       <?php endif; ?>
