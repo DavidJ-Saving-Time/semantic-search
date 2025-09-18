@@ -84,6 +84,40 @@ ALTER SEQUENCE public.docs_id_seq OWNED BY public.docs.id;
 
 
 --
+-- Name: pages; Type: TABLE; Schema: public; Owner: journal_user
+--
+
+CREATE TABLE public.pages (
+    page_id bigint NOT NULL,
+    issue text NOT NULL,
+    page integer NOT NULL
+);
+
+
+ALTER TABLE public.pages OWNER TO journal_user;
+
+--
+-- Name: pages_page_id_seq; Type: SEQUENCE; Schema: public; Owner: journal_user
+--
+
+CREATE SEQUENCE public.pages_page_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+ALTER SEQUENCE public.pages_page_id_seq OWNER TO journal_user;
+
+--
+-- Name: pages_page_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: journal_user
+--
+
+ALTER SEQUENCE public.pages_page_id_seq OWNED BY public.pages.page_id;
+
+
+--
 -- Name: query_cache; Type: TABLE; Schema: public; Owner: journal_user
 --
 
@@ -117,6 +151,13 @@ ALTER TABLE ONLY public.docs ALTER COLUMN id SET DEFAULT nextval('public.docs_id
 
 
 --
+-- Name: pages page_id; Type: DEFAULT; Schema: public; Owner: journal_user
+--
+
+ALTER TABLE ONLY public.pages ALTER COLUMN page_id SET DEFAULT nextval('public.pages_page_id_seq'::regclass);
+
+
+--
 -- Name: docs docs_pkey; Type: CONSTRAINT; Schema: public; Owner: journal_user
 --
 
@@ -130,6 +171,22 @@ ALTER TABLE ONLY public.docs
 
 ALTER TABLE ONLY public.docs
     ADD CONSTRAINT docs_source_file_key UNIQUE (source_file);
+
+
+--
+-- Name: pages pages_issue_page_key; Type: CONSTRAINT; Schema: public; Owner: journal_user
+--
+
+ALTER TABLE ONLY public.pages
+    ADD CONSTRAINT pages_issue_page_key UNIQUE (issue, page);
+
+
+--
+-- Name: pages pages_pkey; Type: CONSTRAINT; Schema: public; Owner: journal_user
+--
+
+ALTER TABLE ONLY public.pages
+    ADD CONSTRAINT pages_pkey PRIMARY KEY (page_id);
 
 
 --
@@ -149,10 +206,31 @@ ALTER TABLE ONLY public.topic_labels
 
 
 --
+-- Name: docs_date_page_id_idx; Type: INDEX; Schema: public; Owner: journal_user
+--
+
+CREATE INDEX docs_date_page_id_idx ON public.docs USING btree (date, page, id);
+
+
+--
 -- Name: docs_embedding_hnsw_hv; Type: INDEX; Schema: public; Owner: journal_user
 --
 
 CREATE INDEX docs_embedding_hnsw_hv ON public.docs USING hnsw (embedding_hv public.halfvec_cosine_ops);
+
+
+--
+-- Name: docs_issue_page_idx; Type: INDEX; Schema: public; Owner: journal_user
+--
+
+CREATE INDEX docs_issue_page_idx ON public.docs USING btree (issue, page);
+
+
+--
+-- Name: pages_issue_page_idx; Type: INDEX; Schema: public; Owner: journal_user
+--
+
+CREATE INDEX pages_issue_page_idx ON public.pages USING btree (issue, page);
 
 
 --

@@ -52,30 +52,22 @@ if ($error === '') {
         $error = 'Database connection failed.';
     } else {
         $sql = <<<SQL
-WITH s AS (
-  SELECT id, page
-  FROM docs
-  WHERE issue = (SELECT issue FROM docs WHERE id = $1)
-    AND page IS NOT NULL
-  ORDER BY page ASC, id ASC
-),
-r AS (
-  SELECT
-    id,
-    LAG(id)  OVER (ORDER BY page, id) AS prev_id,
-    LEAD(id) OVER (ORDER BY page, id) AS next_id
-  FROM s
+WITH cur AS (
+  SELECT d.id, d.issue, d.page
+  FROM docs d
+  WHERE d.id = $1
 )
-SELECT d.id,
-       d.source_file,
-       d.meta->>'journal' AS journal,
-       d.issue,
-       d.page,
-       r.prev_id,
-       r.next_id
+SELECT
+  d.id,
+  d.source_file,
+  d.meta->>'journal' AS journal,
+  d.issue,
+  d.page,
+  -- always +1 / -1
+  c.page + 1 AS next_page,
+  c.page - 1 AS prev_page
 FROM docs d
-JOIN r ON r.id = d.id
-WHERE d.id = $1; 
+JOIN cur c ON d.id = c.id;
 SQL;
 
         $res = pg_query_params($pgconn, $sql, [$pageId]);
