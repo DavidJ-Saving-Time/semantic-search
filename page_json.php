@@ -26,7 +26,7 @@ $PGDATABASE = getenv('PGDATABASE') ?: 'journals';
 $PGUSER = getenv('PGUSER') ?: 'journal_user';
 $PGPASSWORD = getenv('PGPASSWORD') ?: '';
 
-$pageParam = $_GET['page'] ?? '';
+$pageParam = $_GET['page_id'] ?? '';
 $pageId = null;
 $error = '';
 
@@ -36,7 +36,7 @@ if ($pageParam === '' || !preg_match('/^\d+$/', $pageParam)) {
     $pageId = (int)$pageParam;
 }
 
-$doc = null;
+$pageRow = null;
 if ($error === '') {
     $connStr = sprintf(
         "host=%s port=%s dbname=%s user=%s password=%s",
@@ -52,30 +52,55 @@ if ($error === '') {
         $error = 'Database connection failed.';
     } else {
         $sql = <<<SQL
-WITH cur AS (
-  SELECT d.id, d.issue, d.page
-  FROM docs d
-  WHERE d.id = $1
+WITH target AS (
+  SELECT page_id, issue, page
+  FROM pages
+  WHERE page_id = $1
 )
 SELECT
-  d.id,
-  d.source_file,
-  d.meta->>'journal' AS journal,
-  d.issue,
-  d.page,
-  -- always +1 / -1
-  c.page + 1 AS next_page,
-  c.page - 1 AS prev_page
-FROM docs d
-JOIN cur c ON d.id = c.id;
+  t.page_id,
+  t.issue,
+  t.page,
+  nav.prev_page_id,
+  nav.next_page_id,
+  doc.doc_id,
+  doc.source_file,
+  doc.journal,
+  doc.first_page
+FROM target t
+LEFT JOIN LATERAL (
+  SELECT prev_page_id, next_page_id
+  FROM (
+    SELECT
+      page_id,
+      LAG(page_id) OVER (PARTITION BY issue ORDER BY page) AS prev_page_id,
+      LEAD(page_id) OVER (PARTITION BY issue ORDER BY page) AS next_page_id
+    FROM pages
+    WHERE issue = t.issue
+  ) nav_all
+  WHERE nav_all.page_id = t.page_id
+  LIMIT 1
+) nav ON true
+LEFT JOIN LATERAL (
+  SELECT
+    d.id AS doc_id,
+    d.source_file,
+    d.meta->>'journal' AS journal,
+    (d.meta->>'first_page')::int AS first_page
+  FROM docs d
+  WHERE d.issue = t.issue
+    AND d.page = t.page
+  ORDER BY d.id
+  LIMIT 1
+) doc ON true;
 SQL;
 
         $res = pg_query_params($pgconn, $sql, [$pageId]);
         if ($res === false) {
             $error = 'Failed to load page metadata.';
         } else {
-            $doc = pg_fetch_assoc($res) ?: null;
-            if (!$doc) {
+            $pageRow = pg_fetch_assoc($res) ?: null;
+            if (!$pageRow) {
                 $error = 'Page not found.';
             }
         }
@@ -89,16 +114,16 @@ $pageLabel = $error ?: 'Loading…';
 $prevDisabled = true;
 $nextDisabled = true;
 
-if ($error === '' && $doc) {
-    $journal = $doc['journal'] ?? '';
-    $issue = $doc['issue'] ?? '';
-    $sourceFile = $doc['source_file'] ?? '';
+if ($error === '' && $pageRow) {
+    $journal = $pageRow['journal'] ?? '';
+    $issue = $pageRow['issue'] ?? '';
+    $sourceFile = $pageRow['source_file'] ?? '';
     $pageNumber = null;
 
-    if (isset($doc['page']) && $doc['page'] !== null && $doc['page'] !== '') {
-        $pageNumber = (int)$doc['page'];
-    } elseif (isset($doc['first_page']) && $doc['first_page'] !== null && $doc['first_page'] !== '') {
-        $pageNumber = (int)$doc['first_page'];
+    if (isset($pageRow['page']) && $pageRow['page'] !== null && $pageRow['page'] !== '') {
+        $pageNumber = (int)$pageRow['page'];
+    } elseif (isset($pageRow['first_page']) && $pageRow['first_page'] !== null && $pageRow['first_page'] !== '') {
+        $pageNumber = (int)$pageRow['first_page'];
     }
 
     $pad = null;
@@ -118,6 +143,13 @@ if ($error === '' && $doc) {
         $jsonRaw = '/' . ltrim($sourceFile, '/');
     }
 
+    if ($jsonRaw === null && $issue !== '' && $pad !== null) {
+        $trimmedIssue = trim($issue, '/');
+        if ($trimmedIssue !== '') {
+            $jsonRaw = '/' . $trimmedIssue . '/text/page-' . $pad . '.json';
+        }
+    }
+
     if ($imageRaw === null && $jsonRaw !== null) {
         if (preg_match('/\/text\/(page-[^\/]+)\.json$/', $jsonRaw)) {
             $imageRaw = preg_replace('/\/text\/(page-[^\/]+)\.json$/', '/pages/$1.webp', $jsonRaw);
@@ -130,8 +162,8 @@ if ($error === '' && $doc) {
     if ($imagePath === null || $jsonPath === null) {
         $error = 'Page assets missing.';
     } else {
-        $prevId = isset($doc['prev_id']) && $doc['prev_id'] !== null ? (int)$doc['prev_id'] : null;
-        $nextId = isset($doc['next_id']) && $doc['next_id'] !== null ? (int)$doc['next_id'] : null;
+        $prevId = isset($pageRow['prev_page_id']) && $pageRow['prev_page_id'] !== null ? (int)$pageRow['prev_page_id'] : null;
+        $nextId = isset($pageRow['next_page_id']) && $pageRow['next_page_id'] !== null ? (int)$pageRow['next_page_id'] : null;
 
         $pageLabel = $pad !== null ? 'page-' . $pad : ('ID ' . $pageId);
         $prevDisabled = $prevId === null;
@@ -146,6 +178,7 @@ if ($error === '' && $doc) {
             'nextId' => $nextId,
             'issue' => $issue !== '' ? $issue : null,
             'journal' => $journal !== '' ? $journal : null,
+            'docId' => isset($pageRow['doc_id']) && $pageRow['doc_id'] !== null ? (int)$pageRow['doc_id'] : null,
         ];
     }
 }
@@ -788,7 +821,7 @@ window.addEventListener('keydown', (e) => {
   function goToPageId(targetId) {
     if (!targetId) return;
     const usp = new URLSearchParams(location.search);
-    usp.set('page', targetId);
+    usp.set('page_id', targetId);
     location.search = '?' + usp.toString();
   }
 

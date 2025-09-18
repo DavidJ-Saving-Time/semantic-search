@@ -371,9 +371,11 @@ SELECT s.id,
        d.meta->>'topics' AS topics,
        pubname AS pubname,
        date as date,
-       (d.meta->>'first_page')::int AS first_page
+       (d.meta->>'first_page')::int AS first_page,
+       p.page_id
 FROM scored s
 JOIN docs d ON d.id = s.id
+LEFT JOIN pages p ON p.issue = d.issue AND p.page = d.page
 ORDER BY final_score DESC
 LIMIT $6;
 SQL;
@@ -714,10 +716,22 @@ if (!empty($results)) {
 
 
               // 3) Build your link with proper encoding of the query params
-              $hrefILN = '/semantic/page_json.php?' . http_build_query([
-                'page' =>  (string)($row['id'] ?? ''),
-                'q'    => $csv,
-              ]);
+              $pageId = $row['page_id'] ?? null;
+              $hasPageId = $pageId !== null && $pageId !== '';
+              $hrefILN = $hasPageId
+                  ? '/semantic/page_json.php?' . http_build_query([
+                      'page_id' => (string)$pageId,
+                      'q'       => $csv,
+                    ])
+                  : null;
+
+              $thumbLinkAttrs = $hasPageId
+                  ? ' target="_blank" rel="noopener"'
+                  : ' aria-disabled="true"';
+              $sourceBtnClasses = 'btn btn-outline-secondary' . ($hasPageId ? '' : ' disabled');
+              $sourceBtnAttrs = $hasPageId
+                  ? ' target="_blank" rel="noopener"'
+                  : ' aria-disabled="true" tabindex="-1"';
 
               ?>
 
@@ -726,7 +740,7 @@ if (!empty($results)) {
 
     <!-- Left: thumbnail -->
     <?php $page_num = str_pad((string)($row['first_page'] ?? ''), 4, '0', STR_PAD_LEFT); ?>
-    <a target="_blank" rel="noopener" href="<?= $hrefILN ?>">
+    <a<?= $thumbLinkAttrs ?> href="<?= $hrefILN ? h($hrefILN) : '#' ?>">
     <img src="/<?= rawurlencode($row['journal'] ?? '') ?>/<?= rawurlencode($row['issue'] ?? '') ?>/pages/page-<?= rawurlencode((string)$page_num) ?>_thumb.webp"
      alt="Page <?= h($page_num) ?>"
      style="width:150px; height:auto;" />
@@ -736,7 +750,7 @@ if (!empty($results)) {
       <div class="h5 mt-2 mb-1">
         <?=h($row['pubname'] ?? '')?> <?=h($row['date'] ?? '')?> - Page: <?=h($row['first_page'] ?? '') ?>
         <div class="btn-group btn-group-sm ms-2" role="group" aria-label="Result links">
-          <a class="btn btn-outline-secondary" target="_blank" rel="noopener" href="<?= $hrefILN ?>">
+          <a class="<?= h($sourceBtnClasses) ?>"<?= $sourceBtnAttrs ?> href="<?= $hrefILN ? h($hrefILN) : '#' ?>">
             <i class="fa-solid fa-up-right-from-square me-1" aria-hidden="true"></i>Source
           </a>
           <a class="btn btn-outline-secondary js-view-md" target="_blank" rel="noopener" 
@@ -744,7 +758,10 @@ if (!empty($results)) {
             <i class="fa-regular fa-file-lines me-1" aria-hidden="true"></i>Full Summary
           </a>
         </div>
-        <span class="text-body-secondary small ms-2">ID: <?=h((string)$row['id'])?></span>
+        <span class="text-body-secondary small ms-2">Doc ID: <?=h((string)$row['id'])?></span>
+        <?php if ($hasPageId): ?>
+          <span class="text-body-secondary small ms-2">Page ID: <?=h((string)$pageId)?></span>
+        <?php endif; ?>
       </div>
 
       <h2 class="h5 mt-2 mb-1"><?=english_title_case($row['title']);?></h2>
