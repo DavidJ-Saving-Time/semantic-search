@@ -718,12 +718,19 @@ if (!empty($results)) {
               // 3) Build your link with proper encoding of the query params
               $pageId = $row['page_id'] ?? null;
               $hasPageId = $pageId !== null && $pageId !== '';
-              $hrefILN = $hasPageId
-                  ? '/semantic/page_json.php?' . http_build_query([
+              if ($hasPageId) {
+                  $pageLinkParams = [
                       'page_id' => (string)$pageId,
                       'q'       => $csv,
-                    ])
-                  : null;
+                  ];
+                  $journalParam = $row['journal'] ?? null;
+                  if (is_string($journalParam) && $journalParam !== '') {
+                      $pageLinkParams['journal'] = $journalParam;
+                  }
+                  $hrefILN = '/semantic/page_json.php?' . http_build_query($pageLinkParams);
+              } else {
+                  $hrefILN = null;
+              }
 
               $thumbLinkAttrs = $hasPageId
                   ? ' target="_blank" rel="noopener"'

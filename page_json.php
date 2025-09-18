@@ -66,7 +66,8 @@ SELECT
   doc.doc_id,
   doc.source_file,
   doc.journal,
-  doc.first_page
+  doc.first_page,
+  doc_issue.journal AS fallback_journal
 FROM target t
 LEFT JOIN LATERAL (
   SELECT prev_page_id, next_page_id
@@ -92,7 +93,15 @@ LEFT JOIN LATERAL (
     AND d.page = t.page
   ORDER BY d.id
   LIMIT 1
-) doc ON true;
+) doc ON true
+LEFT JOIN LATERAL (
+  SELECT
+    d.meta->>'journal' AS journal
+  FROM docs d
+  WHERE d.issue = t.issue
+  ORDER BY d.id
+  LIMIT 1
+) doc_issue ON true;
 SQL;
 
         $res = pg_query_params($pgconn, $sql, [$pageId]);
@@ -115,7 +124,17 @@ $prevDisabled = true;
 $nextDisabled = true;
 
 if ($error === '' && $pageRow) {
-    $journal = $pageRow['journal'] ?? '';
+    $journal = isset($pageRow['journal']) && $pageRow['journal'] !== null ? (string)$pageRow['journal'] : '';
+    if ($journal === '' && isset($pageRow['fallback_journal']) && $pageRow['fallback_journal'] !== null && $pageRow['fallback_journal'] !== '') {
+        $journal = (string)$pageRow['fallback_journal'];
+    }
+    if ($journal === '') {
+        $journalParam = $_GET['journal'] ?? '';
+        if (is_string($journalParam)) {
+            $journal = trim($journalParam);
+        }
+    }
+    $journal = trim($journal);
     $issue = $pageRow['issue'] ?? '';
     $sourceFile = $pageRow['source_file'] ?? '';
     $pageNumber = null;
