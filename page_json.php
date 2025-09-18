@@ -141,6 +141,14 @@ SQL;
                 $tocError = 'Failed to load table of contents.';
             } else {
                 while ($row = pg_fetch_assoc($tocRes)) {
+                    $count = 0;
+                    if (isset($row['article_count']) && $row['article_count'] !== null && $row['article_count'] !== '') {
+                        $count = (int)$row['article_count'];
+                    }
+                    if ($count <= 0) {
+                        continue;
+                    }
+                    $row['article_count'] = $count;
                     $tocRows[] = $row;
                 }
             }
@@ -298,6 +306,29 @@ if ($error !== '' && $pageMeta === null) {
     .modal-header, .modal-footer { border-color: #223; }
     .modal-title { font-weight: 600; }
     .table-dark a { color: inherit; }
+    .toc-container { display: flex; flex-direction: column; gap: .75rem; }
+    .toc-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: .35rem; }
+    .toc-entry { border-radius: .75rem; }
+    .toc-link,
+    .toc-link.is-static { display: flex; align-items: baseline; gap: .75rem; padding: .65rem .9rem; border-radius: .75rem; background: rgba(255, 255, 255, 0.03); color: inherit; text-decoration: none; transition: background .2s ease, transform .2s ease, box-shadow .2s ease; }
+    .toc-link:hover,
+    .toc-link:focus-visible { background: rgba(255, 255, 255, 0.09); text-decoration: none; }
+    .toc-link:focus-visible { outline: 2px solid rgba(159, 221, 255, 0.7); outline-offset: 2px; }
+    .toc-link.is-static { pointer-events: none; background: rgba(255, 255, 255, 0.02); }
+    .toc-entry.active .toc-link,
+    .toc-link.current { background: rgba(255, 255, 255, 0.16); box-shadow: inset 0 0 0 1px rgba(159, 221, 255, 0.2); font-weight: 600; }
+    .toc-count { font-size: .75rem; font-weight: 600; padding: .2rem .55rem; border-radius: 999px; background: rgba(159, 221, 255, 0.18); color: #bfe3ff; letter-spacing: .05em; text-transform: uppercase; line-height: 1; }
+    .toc-title { display: flex; align-items: baseline; flex: 1 1 auto; min-width: 0; gap: .6rem; position: relative; color: inherit; }
+    .toc-title::after { content: ''; flex: 1 1 auto; border-bottom: 1px dotted rgba(191, 227, 255, 0.35); transform: translateY(-0.35em); }
+    .toc-title-text { flex: 0 1 auto; min-width: 0; overflow-wrap: anywhere; }
+    .toc-page { flex: 0 0 auto; font-variant-numeric: tabular-nums; color: #d6e6ff; letter-spacing: .04em; }
+    @media (max-width: 576px) {
+      .toc-link,
+      .toc-link.is-static { flex-direction: column; align-items: flex-start; gap: .4rem; }
+      .toc-title { width: 100%; }
+      .toc-title::after { display: none; }
+      .toc-page { align-self: flex-end; }
+    }
   </style>
 </head>
 <body<?= $error !== '' ? ' data-error="' . h($error) . '"' : '' ?>>
@@ -344,53 +375,46 @@ if ($error !== '' && $pageMeta === null) {
           <?php elseif (!$tocRows): ?>
             <p class="text-muted mb-0">No table of contents available.</p>
           <?php else: ?>
-            <div class="table-responsive">
-              <table class="table table-dark table-hover align-middle mb-0">
-                <thead>
-                  <tr>
-                    <th scope="col">Page</th>
-                    <th scope="col">Articles</th>
-                    <th scope="col">Titles</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  <?php foreach ($tocRows as $row): ?>
-                    <?php
-                      $rowPageId = isset($row['page_id']) && $row['page_id'] !== '' ? (int)$row['page_id'] : null;
-                      $rowPageLabel = '';
-                      if (isset($row['page']) && $row['page'] !== null && $row['page'] !== '') {
-                          $rowPageLabel = trim((string)$row['page']);
-                      } elseif ($rowPageId !== null) {
-                          $rowPageLabel = 'ID ' . $rowPageId;
-                      }
-                      $rowCount = isset($row['article_count']) && $row['article_count'] !== null ? (int)$row['article_count'] : 0;
-                      $titlesRaw = isset($row['titles']) && $row['titles'] !== null ? trim((string)$row['titles']) : '';
-                      $rowLink = $rowPageId !== null ? ('?page_id=' . urlencode((string)$rowPageId)) : '#';
-                      $isCurrent = $rowPageId !== null && $rowPageId === $pageId;
-                    ?>
-                    <tr<?= $isCurrent ? ' class="table-active"' : '' ?>>
-                      <td>
-                        <?php if ($rowPageId !== null): ?>
-                          <a href="<?= h($rowLink) ?>" class="text-reset text-decoration-none<?= $isCurrent ? ' fw-semibold' : '' ?>">
-                            <?= h($rowPageLabel !== '' ? $rowPageLabel : (string)$rowPageId) ?>
-                          </a>
-                        <?php else: ?>
-                          <?= h($rowPageLabel !== '' ? $rowPageLabel : '—') ?>
-                        <?php endif; ?>
-                      </td>
-                      <td><?= h((string)$rowCount) ?></td>
-                      <td>
-                        <?php if ($titlesRaw !== ''): ?>
-                          <?= h($titlesRaw) ?>
-                        <?php else: ?>
-                          <span class="text-muted">—</span>
-                        <?php endif; ?>
-                      </td>
-                    </tr>
-                  <?php endforeach; ?>
-                </tbody>
-              </table>
-            </div>
+            <nav class="toc-container" aria-label="Table of contents">
+              <ul class="toc-list">
+                <?php foreach ($tocRows as $row): ?>
+                  <?php
+                    $rowPageId = isset($row['page_id']) && $row['page_id'] !== '' ? (int)$row['page_id'] : null;
+                    $rowPageLabel = '';
+                    if (isset($row['page']) && $row['page'] !== null && $row['page'] !== '') {
+                        $rowPageLabel = trim((string)$row['page']);
+                    } elseif ($rowPageId !== null) {
+                        $rowPageLabel = 'ID ' . $rowPageId;
+                    }
+                    $rowCount = isset($row['article_count']) && $row['article_count'] !== null ? (int)$row['article_count'] : 0;
+                    $titlesRaw = isset($row['titles']) && $row['titles'] !== null ? trim((string)$row['titles']) : '';
+                    $rowLink = $rowPageId !== null ? ('?page_id=' . urlencode((string)$rowPageId)) : '#';
+                    $isCurrent = $rowPageId !== null && $rowPageId === $pageId;
+                    $titleText = $titlesRaw !== '' ? $titlesRaw : ($rowCount === 1 ? 'Untitled article' : 'Untitled articles');
+                    $titleClass = 'toc-title-text' . ($titlesRaw === '' ? ' text-muted' : '');
+                    $countLabel = $rowCount === 1 ? '1 article' : ($rowCount . ' articles');
+                    $pageDisplay = $rowPageLabel !== '' ? $rowPageLabel : ($rowPageId !== null ? (string)$rowPageId : '—');
+                  ?>
+                  <li class="toc-entry<?= $isCurrent ? ' active' : '' ?>">
+                    <?php if ($rowPageId !== null): ?>
+                      <a href="<?= h($rowLink) ?>" class="toc-link<?= $isCurrent ? ' current' : '' ?>">
+                    <?php else: ?>
+                      <div class="toc-link is-static<?= $isCurrent ? ' current' : '' ?>" role="text">
+                    <?php endif; ?>
+                        <span class="toc-count" aria-label="<?= h($countLabel) ?>" title="<?= h($countLabel) ?>"><?= h((string)$rowCount) ?></span>
+                        <span class="toc-title">
+                          <span class="<?= h($titleClass) ?>"><?= h($titleText) ?></span>
+                        </span>
+                        <span class="toc-page"><?= h($pageDisplay) ?></span>
+                    <?php if ($rowPageId !== null): ?>
+                      </a>
+                    <?php else: ?>
+                      </div>
+                    <?php endif; ?>
+                  </li>
+                <?php endforeach; ?>
+              </ul>
+            </nav>
           <?php endif; ?>
         </div>
         <div class="modal-footer">
