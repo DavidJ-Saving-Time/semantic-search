@@ -394,7 +394,7 @@ if ($error !== '' && $pageMeta === null) {
                     $titleClass = 'toc-title-text' . ($titlesRaw === '' ? ' text-muted' : '');
                     $countLabel = $rowCount === 1 ? '1 article' : ($rowCount . ' articles');
                     $pageDisplay = $rowPageLabel !== '' ? $rowPageLabel : ($rowPageId !== null ? (string)$rowPageId : '—');
-                  ?>
+                    ?>
                   <li class="toc-entry<?= $isCurrent ? ' active' : '' ?>">
                     <?php if ($rowPageId !== null): ?>
                       <a href="<?= h($rowLink) ?>" class="toc-link<?= $isCurrent ? ' current' : '' ?>">
