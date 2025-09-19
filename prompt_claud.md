@@ -34,7 +34,7 @@ Introduced\_Anchors:
 Context rules:
 
 * You MAY introduce 0–2 specific named anchors (events/statutes/people) to situate the article.
-* Each anchor must be directly relevant and within \[1846–1850]. If an anchor outside this window is essential context (e.g., a pivotal precursor), include it sparingly, give the year, and justify in the “why relevant” line; `Window_OK` may still be `YES` if clearly justified.
+* Each anchor must be directly relevant and within \[1846–1859]. If an anchor outside this window is essential context (e.g., a pivotal precursor), include it sparingly, give the year, and justify in the “why relevant” line; `Window_OK` may still be `YES` if clearly justified.
 * After each anchor, include its year in parentheses, e.g., `Encumbered Estates Act (1849)`.
 * If you are not ≥80% sure of an anchor’s year, do not use it.
 * If the article text implies a later chronology (e.g., figures/events from 1851–1852), set `DATE_CONFLICT` with a one-sentence explanation and do not introduce those as anchors.

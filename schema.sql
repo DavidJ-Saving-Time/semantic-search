@@ -84,6 +84,41 @@ ALTER SEQUENCE public.docs_id_seq OWNED BY public.docs.id;
 
 
 --
+-- Name: hcontext; Type: TABLE; Schema: public; Owner: journal_user
+--
+
+CREATE TABLE public.hcontext (
+    id integer NOT NULL,
+    fid integer NOT NULL,
+    context text
+);
+
+
+ALTER TABLE public.hcontext OWNER TO journal_user;
+
+--
+-- Name: hcontext_id_seq; Type: SEQUENCE; Schema: public; Owner: journal_user
+--
+
+CREATE SEQUENCE public.hcontext_id_seq
+    AS integer
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+ALTER SEQUENCE public.hcontext_id_seq OWNER TO journal_user;
+
+--
+-- Name: hcontext_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: journal_user
+--
+
+ALTER SEQUENCE public.hcontext_id_seq OWNED BY public.hcontext.id;
+
+
+--
 -- Name: pages; Type: TABLE; Schema: public; Owner: journal_user
 --
 
@@ -151,6 +186,13 @@ ALTER TABLE ONLY public.docs ALTER COLUMN id SET DEFAULT nextval('public.docs_id
 
 
 --
+-- Name: hcontext id; Type: DEFAULT; Schema: public; Owner: journal_user
+--
+
+ALTER TABLE ONLY public.hcontext ALTER COLUMN id SET DEFAULT nextval('public.hcontext_id_seq'::regclass);
+
+
+--
 -- Name: pages page_id; Type: DEFAULT; Schema: public; Owner: journal_user
 --
 
@@ -171,6 +213,14 @@ ALTER TABLE ONLY public.docs
 
 ALTER TABLE ONLY public.docs
     ADD CONSTRAINT docs_source_file_key UNIQUE (source_file);
+
+
+--
+-- Name: hcontext hcontext_pkey; Type: CONSTRAINT; Schema: public; Owner: journal_user
+--
+
+ALTER TABLE ONLY public.hcontext
+    ADD CONSTRAINT hcontext_pkey PRIMARY KEY (id);
 
 
 --
