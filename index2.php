@@ -720,6 +720,7 @@ if (!empty($results)) {
               $topics = is_array($topics_raw) ? $topics_raw : (json_decode($topics_raw, true) ?: []);
 
               $historicalContext = trim((string)($row['hcontext'] ?? ''));
+              $docTitle = english_title_case($row['title'] ?? '');
 
               // 2) Make a simple CSV string (M.P.,Lloyd’s,Lord John Russell,Jeremy Taylor)
               $csv = implode(',', array_map('trim', $anchors));
@@ -773,7 +774,7 @@ if (!empty($results)) {
           <button type="button"
                   class="btn btn-outline-secondary js-historical-context"
                   data-doc-id="<?= h((string)($row['id'] ?? '')) ?>"
-                  data-doc-title="<?= h(english_title_case($row['title'] ?? '')) ?>">
+                  data-doc-title="<?= h($docTitle) ?>">
             <i class="fa-solid fa-landmark me-1" aria-hidden="true"></i>Historical Context
           </button>
           <a class="btn btn-outline-secondary js-view-md" target="_blank" rel="noopener"
@@ -787,15 +788,33 @@ if (!empty($results)) {
         <?php endif; ?>
       </div>
 
-      <h2 class="h5 mt-2 mb-1"><?=english_title_case($row['title']);?></h2>
+      <h2 class="h5 mt-2 mb-1"><?=h($docTitle);?></h2>
       <div class="snippet"><?=h($row['snippet'] ?? '')?></div>
 
-      <?php if ($historicalContext !== ''): ?>
-        <div class="mt-3">
-          <h3 class="h6 mb-1"><i class="fa-solid fa-landmark me-1" aria-hidden="true"></i>Historical Context</h3>
-          <div class="text-body-secondary small"><?=nl2br(h($historicalContext), false)?></div>
+      <?php $hasHistoricalContext = $historicalContext !== ''; ?>
+      <div class="mt-3 js-historical-context-area">
+        <div class="js-historical-context-wrapper<?= $hasHistoricalContext ? '' : ' d-none' ?>"<?= $hasHistoricalContext ? '' : ' hidden' ?>>
+          <h3 class="h6 mb-1">
+            <i class="fa-solid fa-landmark me-1" aria-hidden="true"></i>
+            Historical Context
+            <span class="js-historical-context-title text-body-secondary small ms-2">
+              <?php if ($hasHistoricalContext && $docTitle !== ''): ?>
+                <?=h($docTitle)?>
+              <?php endif; ?>
+            </span>
+          </h3>
+          <div class="text-body-secondary small js-historical-context-content">
+            <?php if ($hasHistoricalContext): ?>
+              <?=nl2br(h($historicalContext), false)?>
+            <?php endif; ?>
+          </div>
         </div>
-      <?php endif; ?>
+        <div class="js-historical-context-loading d-none text-body-secondary small d-flex align-items-center gap-2">
+          <i class="fa-solid fa-spinner fa-spin" aria-hidden="true"></i>
+          <span>Contacting Claude…</span>
+        </div>
+        <div class="js-historical-context-error alert alert-danger d-none mt-2" role="alert"></div>
+      </div>
 
       <!-- Genre and topics -->
       <div class="text-body-secondary small ms-2 mt-2">
@@ -839,29 +858,6 @@ if (!empty($results)) {
   </div>
 
   <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
-  <!-- Historical Context Modal -->
-  <div class="modal fade" id="contextModal" tabindex="-1" aria-hidden="true">
-    <div class="modal-dialog modal-lg modal-dialog-scrollable">
-      <div class="modal-content">
-        <div class="modal-header">
-          <h5 class="modal-title"><i class="fa-solid fa-landmark me-2"></i><span id="contextModalTitle">Historical Context</span></h5>
-          <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
-        </div>
-        <div class="modal-body">
-          <div id="contextLoading" class="d-flex align-items-center gap-2 mb-3" hidden>
-            <i class="fa-solid fa-spinner fa-spin"></i>
-            <span>Contacting Claude…</span>
-          </div>
-          <div id="contextError" class="alert alert-danger d-none" role="alert"></div>
-          <article id="contextContent" class="markdown-body"></article>
-        </div>
-        <div class="modal-footer">
-          <button type="button" class="btn btn-primary" data-bs-dismiss="modal">Close</button>
-        </div>
-      </div>
-    </div>
-  </div>
-
   <!-- Markdown Modal -->
   <div class="modal fade" id="mdModal" tabindex="-1" aria-hidden="true">
     <div class="modal-dialog modal-xl modal-dialog-scrollable">
@@ -909,17 +905,6 @@ if (!empty($results)) {
 
   <script>
 (function() {
-    const modalEl = document.getElementById('contextModal');
-    if (!modalEl) {
-        return;
-    }
-
-    const modal = new bootstrap.Modal(modalEl);
-    const titleEl = document.getElementById('contextModalTitle');
-    const loadingEl = document.getElementById('contextLoading');
-    const errorEl = document.getElementById('contextError');
-    const contentEl = document.getElementById('contextContent');
-
     document.addEventListener('click', function(evt) {
         const btn = evt.target.closest('button.js-historical-context');
         if (!btn) {
@@ -933,18 +918,31 @@ if (!empty($results)) {
             return;
         }
 
-        const docTitle = btn.getAttribute('data-doc-title') || 'Historical Context';
-        titleEl.textContent = docTitle;
-        contentEl.innerHTML = '';
-        errorEl.classList.add('d-none');
+        const listItem = btn.closest('.list-group-item');
+        if (!listItem) {
+            return;
+        }
+
+        const wrapper = listItem.querySelector('.js-historical-context-wrapper');
+        const contentEl = listItem.querySelector('.js-historical-context-content');
+        const loadingEl = listItem.querySelector('.js-historical-context-loading');
+        const errorEl = listItem.querySelector('.js-historical-context-error');
+        const titleEl = listItem.querySelector('.js-historical-context-title');
+
+        if (!contentEl) {
+            return;
+        }
+
+        if (errorEl) {
+            errorEl.textContent = '';
+            errorEl.classList.add('d-none');
+        }
         if (loadingEl) {
-            loadingEl.hidden = false;
+            loadingEl.classList.remove('d-none');
         }
 
         const previousDisabled = btn.disabled;
         btn.disabled = true;
-
-        modal.show();
 
         fetch('historical_context.php', {
                 method: 'POST',
@@ -973,14 +971,24 @@ if (!empty($results)) {
                     breaks: true
                 });
                 contentEl.innerHTML = DOMPurify.sanitize(html);
+                if (wrapper) {
+                    wrapper.classList.remove('d-none');
+                    wrapper.removeAttribute('hidden');
+                }
+                if (titleEl) {
+                    const docTitle = btn.getAttribute('data-doc-title') || 'Historical Context';
+                    titleEl.textContent = docTitle;
+                }
             })
             .catch(err => {
-                errorEl.textContent = 'Failed to load historical context: ' + err.message;
-                errorEl.classList.remove('d-none');
+                if (errorEl) {
+                    errorEl.textContent = 'Failed to load historical context: ' + err.message;
+                    errorEl.classList.remove('d-none');
+                }
             })
             .finally(() => {
                 if (loadingEl) {
-                    loadingEl.hidden = true;
+                    loadingEl.classList.add('d-none');
                 }
                 btn.disabled = previousDisabled;
             });
