@@ -198,7 +198,15 @@ function cache_put(PDO $pdo, string $qkey, array $embedding): void
     }
 }
 
-$selectedPub = isset($_POST['pubname']) ? trim($_POST['pubname']) : '';
+$selectedPub = isset($_POST['pubname']) ? trim((string)$_POST['pubname']) : '';
+$selectedYear = isset($_POST['year']) ? trim((string)$_POST['year']) : '';
+if ($selectedYear !== '' && !preg_match('/^\d{4}$/', $selectedYear)) {
+    $selectedYear = '';
+}
+$selectedGenre = isset($_POST['genre']) ? trim((string)$_POST['genre']) : '';
+if ($selectedGenre !== '' && mb_strlen($selectedGenre) > 100) {
+    $selectedGenre = '';
+}
 
 $pdo = pg_pdo($PGHOST, $PGPORT, $PGDATABASE, $PGUSER, $PGPASSWORD, 5000); // 5s timeout example
 
@@ -223,6 +231,59 @@ foreach ($pdo->query($sqlCounts, PDO::FETCH_ASSOC) as $r) {
     $counts[$r['k']] = (int)$r['cnt'];
     $total += (int)$r['cnt'];
 }
+
+$years = [];
+$yearCounts = [];
+$yearTotal = 0;
+$yearRows = $pdo->query("
+    SELECT date_part('year', date)::int AS year, COUNT(*)::int AS cnt
+    FROM docs
+    WHERE date IS NOT NULL
+    GROUP BY date_part('year', date)::int
+    ORDER BY year DESC
+")->fetchAll(PDO::FETCH_ASSOC);
+foreach ($yearRows as $row) {
+    $yearValue = trim((string)($row['year'] ?? ''));
+    if ($yearValue === '') {
+        continue;
+    }
+    $years[] = $yearValue;
+    $yearCounts[$yearValue] = (int)$row['cnt'];
+    $yearTotal += (int)$row['cnt'];
+}
+if ($selectedYear !== '' && !in_array($selectedYear, $years, true)) {
+    $selectedYear = '';
+}
+
+$genres = [];
+$genreCounts = [];
+$genreLookup = [];
+$genreRows = $pdo->query("
+    SELECT MIN(btrim(g.val)) AS genre, COUNT(*)::int AS cnt
+    FROM docs
+    CROSS JOIN LATERAL unnest(genre) AS g(val)
+    WHERE g.val IS NOT NULL AND btrim(g.val) <> ''
+    GROUP BY lower(btrim(g.val))
+    ORDER BY genre
+")->fetchAll(PDO::FETCH_ASSOC);
+foreach ($genreRows as $row) {
+    $genreLabel = trim((string)($row['genre'] ?? ''));
+    if ($genreLabel === '') {
+        continue;
+    }
+    $genres[] = $genreLabel;
+    $genreCounts[$genreLabel] = (int)$row['cnt'];
+    $genreLookup[strtolower($genreLabel)] = $genreLabel;
+}
+if ($selectedGenre !== '') {
+    $genreKey = strtolower($selectedGenre);
+    if (isset($genreLookup[$genreKey])) {
+        $selectedGenre = $genreLookup[$genreKey];
+    } else {
+        $selectedGenre = '';
+    }
+}
+unset($genreLookup);
 
 
 
@@ -302,7 +363,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             //pg_query($pgconn, 'SET hnsw.ef_search = 80');
 
             // PHP params order (leave as-is):
-            // [$vec, $w_sim, $w_topic, $thresh, $k, $limit]
+            // [$vec, $w_sim, $w_topic, $thresh, $k, $limit, $pubname, $year, $genre]
             $sql_pg = <<<SQL
 WITH params AS (
   SELECT
@@ -331,6 +392,12 @@ doc_candidates AS (
   WHERE d.embedding_hv IS NOT NULL
     AND (d.meta->'topics' IS NULL OR jsonb_typeof(d.meta->'topics')='array')
     AND ($7::text IS NULL OR d.pubname = $7::text)
+    AND ($8::int IS NULL OR EXTRACT(YEAR FROM d.date)::int = $8::int)
+    AND ($9::text IS NULL OR EXISTS (
+          SELECT 1
+          FROM unnest(COALESCE(d.genre, ARRAY[]::text[])) AS g(val)
+          WHERE lower(btrim(g.val)) = lower(btrim($9::text))
+        ))
   ORDER BY d.embedding_hv <=> ($1::halfvec(3072))
   LIMIT GREATEST((SELECT k FROM params), $6 * 10)
 ),
@@ -390,7 +457,9 @@ SQL;
 
             $t0 = microtime(true);
             $pubnameParam = ($selectedPub === '') ? null : $selectedPub;
-            $params = [$vec, $w_sim, $w_topic, $thresh, $k, $limit, $pubnameParam];
+            $yearParam = ($selectedYear === '') ? null : $selectedYear;
+            $genreParam = ($selectedGenre === '') ? null : $selectedGenre;
+            $params = [$vec, $w_sim, $w_topic, $thresh, $k, $limit, $pubnameParam, $yearParam, $genreParam];
             $res = pg_query_params($pgconn, $sql_pg, $params);
 
 
@@ -629,6 +698,36 @@ if (!empty($results)) {
           <?php $cnt = $counts[$p] ?? 0; ?>
           <option value="<?= h($p) ?>" <?= strcasecmp($selectedPub, $p) === 0 ? 'selected' : '' ?>>
             <?= h($p) ?> (<?= number_format($cnt) ?>)
+          </option>
+        <?php endforeach; ?>
+      </select>
+    </div>
+
+    <!-- Year -->
+    <div>
+      <label for="year" class="form-label">Year</label>
+      <select name="year" id="year" class="form-select">
+        <option value="" <?= $selectedYear === '' ? 'selected' : '' ?>>
+          All Years<?php if ($yearTotal > 0): ?> (<?= number_format($yearTotal) ?>)<?php endif; ?>
+        </option>
+        <?php foreach ($years as $year): ?>
+          <?php $yearCnt = $yearCounts[$year] ?? 0; ?>
+          <option value="<?= h($year) ?>" <?= $selectedYear === $year ? 'selected' : '' ?>>
+            <?= h($year) ?> (<?= number_format($yearCnt) ?>)
+          </option>
+        <?php endforeach; ?>
+      </select>
+    </div>
+
+    <!-- Genre -->
+    <div>
+      <label for="genre" class="form-label">Genre</label>
+      <select name="genre" id="genre" class="form-select">
+        <option value="" <?= $selectedGenre === '' ? 'selected' : '' ?>>All Genres</option>
+        <?php foreach ($genres as $genre): ?>
+          <?php $genreCnt = $genreCounts[$genre] ?? 0; ?>
+          <option value="<?= h($genre) ?>" <?= $selectedGenre === $genre ? 'selected' : '' ?>>
+            <?= h($genre) ?> (<?= number_format($genreCnt) ?>)
           </option>
         <?php endforeach; ?>
       </select>
