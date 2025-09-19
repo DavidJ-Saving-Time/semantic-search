@@ -10,8 +10,8 @@ You will receive one or more article blocks in markdown, already normalized. Eac
 Use the exact ID value (the line immediately under the title).
 
 Grounding metadata (treat as facts):
-Newspaper: Illustrated London News
-Issue\_Date: 1850-01-05 (ground truth)
+Newspaper: {{NEWSPAPER}}
+Issue\_Date: {{ISSUE_DATE}}
 Place: London, United Kingdom
 
 Do not repeat the title, summary, or any other fields from the article.

@@ -93,7 +93,6 @@ SELECT
   md,
   meta->>'title' AS title,
   meta->>'issue' AS issue,
-  pubname,
   date::text AS issue_date
 FROM docs
 WHERE id = $1
@@ -134,11 +133,17 @@ if (trim($articleMarkdown) === '') {
 }
 
 $title = $docRow['title'] ?? '';
-$issueDate = $docRow['issue_date'] ?? '';
-if ($issueDate === '' && isset($docRow['issue'])) {
-    $issueDate = $docRow['issue'];
-}
-$issueDate = trim((string)$issueDate);
+
+$issueNameRaw = trim((string)($docRow['issue'] ?? ''));
+$issueNameForPrompt = $issueNameRaw !== '' ? $issueNameRaw : 'Illustrated London News';
+
+$issueDateRaw = trim((string)($docRow['issue_date'] ?? ''));
+$issueDateForPrompt = $issueDateRaw !== '' ? $issueDateRaw : '1850-01-05';
+
+$systemPrompt = strtr($systemPrompt, [
+    '{{NEWSPAPER}}' => $issueNameForPrompt,
+    '{{ISSUE_DATE}}' => $issueDateForPrompt,
+]);
 
 $location = 'London, England';
 
@@ -148,8 +153,11 @@ if ($title !== '') {
     $userParts[] = 'Article Title: ' . $title;
 }
 $userParts[] = 'Document ID: ' . $docId;
-if ($issueDate !== '') {
-    $userParts[] = 'Issue Date: ' . $issueDate;
+if ($issueNameForPrompt !== '') {
+    $userParts[] = 'Newspaper: ' . $issueNameForPrompt;
+}
+if ($issueDateForPrompt !== '') {
+    $userParts[] = 'Issue Date: ' . $issueDateForPrompt;
 }
 $userParts[] = 'Location: ' . $location;
 $userParts[] = "Article Markdown:\n" . $articleMarkdown;
