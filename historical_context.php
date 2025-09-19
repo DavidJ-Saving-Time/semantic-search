@@ -111,9 +111,9 @@ if ($res === false) {
 }
 
 $docRow = pg_fetch_assoc($res) ?: null;
-pg_close($pgconn);
 
 if (!$docRow) {
+    pg_close($pgconn);
     http_response_code(404);
     echo json_encode([
         'ok' => false,
@@ -124,6 +124,7 @@ if (!$docRow) {
 
 $articleMarkdown = $docRow['md'] ?? '';
 if (trim($articleMarkdown) === '') {
+    pg_close($pgconn);
     http_response_code(400);
     echo json_encode([
         'ok' => false,
@@ -208,6 +209,7 @@ $error = curl_error($ch);
 curl_close($ch);
 
 if ($response === false) {
+    pg_close($pgconn);
     http_response_code(502);
     echo json_encode([
         'ok' => false,
@@ -217,6 +219,7 @@ if ($response === false) {
 }
 
 if ($httpStatus < 200 || $httpStatus >= 300) {
+    pg_close($pgconn);
     http_response_code($httpStatus);
     $detail = $response;
     $decodedError = json_decode($response, true);
@@ -232,6 +235,7 @@ if ($httpStatus < 200 || $httpStatus >= 300) {
 
 $decoded = json_decode($response, true);
 if (!is_array($decoded)) {
+    pg_close($pgconn);
     http_response_code(502);
     echo json_encode([
         'ok' => false,
@@ -259,6 +263,7 @@ if (isset($decoded['choices'][0]['message']['content'])) {
 }
 
 if ($content === '') {
+    pg_close($pgconn);
     http_response_code(502);
     echo json_encode([
         'ok' => false,
@@ -266,6 +271,20 @@ if ($content === '') {
     ]);
     exit;
 }
+
+$insertSql = 'INSERT INTO hcontext (fid, context) VALUES ($1, $2)';
+$insertRes = pg_query_params($pgconn, $insertSql, [$docId, $content]);
+if ($insertRes === false) {
+    pg_close($pgconn);
+    http_response_code(500);
+    echo json_encode([
+        'ok' => false,
+        'error' => 'Failed to store historical context.'
+    ]);
+    exit;
+}
+
+pg_close($pgconn);
 
 echo json_encode([
     'ok' => true,
