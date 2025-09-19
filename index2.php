@@ -372,9 +372,17 @@ SELECT s.id,
        pubname AS pubname,
        date as date,
        (d.meta->>'first_page')::int AS first_page,
-       p.page_id
+       p.page_id,
+       hc.context AS hcontext
 FROM scored s
 JOIN docs d ON d.id = s.id
+LEFT JOIN LATERAL (
+  SELECT context
+  FROM hcontext h
+  WHERE h.fid = d.id
+  ORDER BY h.id DESC
+  LIMIT 1
+) hc ON true
 LEFT JOIN pages p ON p.issue = d.issue AND p.page = d.page
 ORDER BY final_score DESC
 LIMIT $6;
@@ -711,6 +719,8 @@ if (!empty($results)) {
               $genres = is_array($genres_raw) ? $genres_raw : (json_decode($genres_raw, true) ?: []);
               $topics = is_array($topics_raw) ? $topics_raw : (json_decode($topics_raw, true) ?: []);
 
+              $historicalContext = trim((string)($row['hcontext'] ?? ''));
+
               // 2) Make a simple CSV string (M.P.,Lloyd’s,Lord John Russell,Jeremy Taylor)
               $csv = implode(',', array_map('trim', $anchors));
 
@@ -779,6 +789,13 @@ if (!empty($results)) {
 
       <h2 class="h5 mt-2 mb-1"><?=english_title_case($row['title']);?></h2>
       <div class="snippet"><?=h($row['snippet'] ?? '')?></div>
+
+      <?php if ($historicalContext !== ''): ?>
+        <div class="mt-3">
+          <h3 class="h6 mb-1"><i class="fa-solid fa-landmark me-1" aria-hidden="true"></i>Historical Context</h3>
+          <div class="text-body-secondary small"><?=nl2br(h($historicalContext), false)?></div>
+        </div>
+      <?php endif; ?>
 
       <!-- Genre and topics -->
       <div class="text-body-secondary small ms-2 mt-2">
