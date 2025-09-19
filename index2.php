@@ -760,7 +760,13 @@ if (!empty($results)) {
           <a class="<?= h($sourceBtnClasses) ?>"<?= $sourceBtnAttrs ?> href="<?= $hrefILN ? h($hrefILN) : '#' ?>">
             <i class="fa-solid fa-up-right-from-square me-1" aria-hidden="true"></i>Source
           </a>
-          <a class="btn btn-outline-secondary js-view-md" target="_blank" rel="noopener" 
+          <button type="button"
+                  class="btn btn-outline-secondary js-historical-context"
+                  data-doc-id="<?= h((string)($row['id'] ?? '')) ?>"
+                  data-doc-title="<?= h(english_title_case($row['title'] ?? '')) ?>">
+            <i class="fa-solid fa-landmark me-1" aria-hidden="true"></i>Historical Context
+          </button>
+          <a class="btn btn-outline-secondary js-view-md" target="_blank" rel="noopener"
              href="/EWJ_issues/<?=h($row['issue'] ?? '')?>.md">
             <i class="fa-regular fa-file-lines me-1" aria-hidden="true"></i>Full Summary
           </a>
@@ -816,6 +822,29 @@ if (!empty($results)) {
   </div>
 
   <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+  <!-- Historical Context Modal -->
+  <div class="modal fade" id="contextModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-lg modal-dialog-scrollable">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h5 class="modal-title"><i class="fa-solid fa-landmark me-2"></i><span id="contextModalTitle">Historical Context</span></h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+        </div>
+        <div class="modal-body">
+          <div id="contextLoading" class="d-flex align-items-center gap-2 mb-3" hidden>
+            <i class="fa-solid fa-spinner fa-spin"></i>
+            <span>Contacting Claude…</span>
+          </div>
+          <div id="contextError" class="alert alert-danger d-none" role="alert"></div>
+          <article id="contextContent" class="markdown-body"></article>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-primary" data-bs-dismiss="modal">Close</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <!-- Markdown Modal -->
   <div class="modal fade" id="mdModal" tabindex="-1" aria-hidden="true">
     <div class="modal-dialog modal-xl modal-dialog-scrollable">
@@ -862,6 +891,85 @@ if (!empty($results)) {
 
 
   <script>
+(function() {
+    const modalEl = document.getElementById('contextModal');
+    if (!modalEl) {
+        return;
+    }
+
+    const modal = new bootstrap.Modal(modalEl);
+    const titleEl = document.getElementById('contextModalTitle');
+    const loadingEl = document.getElementById('contextLoading');
+    const errorEl = document.getElementById('contextError');
+    const contentEl = document.getElementById('contextContent');
+
+    document.addEventListener('click', function(evt) {
+        const btn = evt.target.closest('button.js-historical-context');
+        if (!btn) {
+            return;
+        }
+
+        evt.preventDefault();
+
+        const docId = btn.getAttribute('data-doc-id');
+        if (!docId) {
+            return;
+        }
+
+        const docTitle = btn.getAttribute('data-doc-title') || 'Historical Context';
+        titleEl.textContent = docTitle;
+        contentEl.innerHTML = '';
+        errorEl.classList.add('d-none');
+        if (loadingEl) {
+            loadingEl.hidden = false;
+        }
+
+        const previousDisabled = btn.disabled;
+        btn.disabled = true;
+
+        modal.show();
+
+        fetch('historical_context.php', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    doc_id: docId
+                })
+            })
+            .then(res => {
+                if (!res.ok) {
+                    throw new Error('HTTP ' + res.status);
+                }
+                return res.json();
+            })
+            .then(data => {
+                if (!data || data.ok !== true) {
+                    const errMsg = data && data.error ? data.error : 'Unexpected response from server.';
+                    throw new Error(errMsg);
+                }
+                const content = typeof data.content === 'string' ? data.content : '';
+                const html = marked.parse(content, {
+                    mangle: false,
+                    headerIds: true,
+                    breaks: true
+                });
+                contentEl.innerHTML = DOMPurify.sanitize(html);
+            })
+            .catch(err => {
+                errorEl.textContent = 'Failed to load historical context: ' + err.message;
+                errorEl.classList.remove('d-none');
+            })
+            .finally(() => {
+                if (loadingEl) {
+                    loadingEl.hidden = true;
+                }
+                btn.disabled = previousDisabled;
+            });
+    });
+})();
+
 (function() {
     const modalEl = document.getElementById('mdModal');
     const modal = new bootstrap.Modal(modalEl);
