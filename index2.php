@@ -428,8 +428,11 @@ SELECT
   d.date::text AS date,
   d.summary_clean AS summary,
   d.meta->>'title' AS title,
+  p.page_id,
   1 - (d.embedding_hv <=> ($1::public.halfvec(3072))) AS score
 FROM public.docs d
+LEFT JOIN public.pages p
+  ON p.issue = d.issue AND p.page = d.page
 WHERE d.embedding_hv IS NOT NULL
   AND d.date >= $2::date
   AND d.date < $3::date
@@ -450,6 +453,14 @@ SQL;
                 $summary = rtrim(mb_substr($summary, 0, 600)) . '…';
             }
 
+            $pageId = null;
+            if (isset($row['page_id']) && $row['page_id'] !== null && $row['page_id'] !== '') {
+                $pageId = (int)$row['page_id'];
+                if ($pageId <= 0) {
+                    $pageId = null;
+                }
+            }
+
             $items[] = [
                 'id' => isset($row['id']) ? (int)$row['id'] : null,
                 'pubname' => $row['pubname'] ?? null,
@@ -457,6 +468,7 @@ SQL;
                 'title' => $row['title'] ?? null,
                 'summary' => $summary,
                 'score' => isset($row['score']) ? (float)$row['score'] : null,
+                'page_id' => $pageId,
             ];
         }
 
@@ -1920,9 +1932,17 @@ $heatmapConfigJson = $heatmapConfigForJs !== null ? h(json_encode($heatmapConfig
                     if (item.date) meta.push(item.date);
                     if (typeof item.score === 'number') meta.push('score ' + item.score.toFixed(3));
                     const summary = escapeHtml(item.summary || '');
+                    let linkHtml = '';
+                    if (typeof item.page_id === 'number' && item.page_id > 0 && item.pubname) {
+                        const journalParam = encodeURIComponent(String(item.pubname));
+                        const pageParam = encodeURIComponent(String(item.page_id));
+                        const url = 'https://nilla.local/semantic/page_json.php?page_id=' + pageParam + '&journal=' + journalParam;
+                        linkHtml = '<div class="mt-2"><a class="small" href="' + url + '" target="_blank" rel="noopener">View article page</a></div>';
+                    }
                     li.innerHTML = '<div class="fw-semibold">' + title + '</div>' +
                         '<div class="text-body-secondary small mb-2">' + escapeHtml(meta.join(' • ')) + '</div>' +
-                        '<div class="text-body-secondary small">' + summary + '</div>';
+                        '<div class="text-body-secondary small">' + summary + '</div>' +
+                        linkHtml;
                     fragment.appendChild(li);
                 });
                 listEl.innerHTML = '';
