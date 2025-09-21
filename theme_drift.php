@@ -1553,7 +1553,7 @@ if ($defaultStartYear > $defaultEndYear) {
                 mode: 'markers',
                 x: xs,
                 y: ys,
-                hoverinfo: 'skip',
+                hovertemplate: '<extra></extra>',
                 marker,
                 customdata: payload.items.map((item, idx) => [idx, item.period_key || '', item.period_start || '', item.period_end || ''])
             };
