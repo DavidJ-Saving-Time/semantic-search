@@ -224,7 +224,7 @@ function format_period_label(string $period, ?string $startDate): string
 
 function fetch_period_row(PDO $pdo, string $period, string $periodKey, bool $isCombined, ?string $pubname): ?array
 {
-    $sql = "SELECT id, period, period_key, period_start::text AS period_start, period_end::text AS period_end, pubname, is_combined FROM public.period_embeddings WHERE period = :period AND period_key = :period_key AND is_combined = :is_combined";
+    $sql = "SELECT id, period, period_key, period_start::text AS period_start, period_end::text AS period_end, pubname, is_combined, article_count, token_count FROM public.period_embeddings WHERE period = :period AND period_key = :period_key AND is_combined = :is_combined";
     if (!$isCombined) {
         $sql .= " AND pubname = :pubname";
     }
@@ -247,6 +247,159 @@ function fetch_period_row(PDO $pdo, string $period, string $periodKey, bool $isC
     $row['id'] = isset($row['id']) ? (int)$row['id'] : null;
 
     return $row;
+}
+
+function compute_period_insight(PDO $pdo, array $periodRow, int $limit = 15): array
+{
+    $periodId = isset($periodRow['id']) ? (int)$periodRow['id'] : 0;
+    if ($periodId <= 0) {
+        return [];
+    }
+
+    $sql = "SELECT d.id, d.pubname, d.date::text AS date, COALESCE(NULLIF(d.summary_clean, ''), NULLIF(d.summary_raw, ''), '') AS summary, d.meta->>'title' AS title, 1 - (d.embedding_hv <=> p.embedding_hv) AS similarity FROM public.period_embeddings p JOIN public.docs d ON d.embedding_hv IS NOT NULL AND d.date IS NOT NULL AND d.date >= p.period_start AND d.date <= p.period_end AND (p.is_combined = true OR d.pubname = p.pubname) WHERE p.id = :id ORDER BY d.embedding_hv <=> p.embedding_hv ASC LIMIT :limit";
+
+    $stmt = $pdo->prepare($sql);
+    $stmt->bindValue(':id', $periodId, PDO::PARAM_INT);
+    $stmt->bindValue(':limit', $limit, PDO::PARAM_INT);
+    $stmt->execute();
+    $rows = $stmt->fetchAll();
+
+    $summaries = [];
+    foreach ($rows as $row) {
+        $summary = trim((string)($row['summary'] ?? ''));
+        if ($summary !== '') {
+            $summaries[] = $summary;
+        }
+    }
+
+    $phrases = extract_key_phrases($summaries, 3);
+    $headlines = select_representative_headlines($rows, 2);
+
+    $period = $periodRow['period'] ?? 'year';
+    $periodStart = $periodRow['period_start'] ?? null;
+    $monthIso = null;
+    if (is_string($periodStart) && strlen($periodStart) >= 7) {
+        $monthIso = substr($periodStart, 0, 7);
+    }
+
+    return [
+        'period_key' => $periodRow['period_key'] ?? null,
+        'period_start' => $periodStart,
+        'period_end' => $periodRow['period_end'] ?? null,
+        'doc_count' => count($rows),
+        'phrases' => $phrases,
+        'headlines' => $headlines,
+        'month_iso' => $monthIso,
+        'label' => format_period_label($period, $periodStart),
+        'article_count' => isset($periodRow['article_count']) ? (int)$periodRow['article_count'] : null,
+    ];
+}
+
+function call_openrouter_label(string $prompt, string $model = 'anthropic/claude-opus-4', float $temperature = 0.2): string
+{
+    $apiKey = getenv('OPENROUTER_API_KEY');
+    if (!$apiKey) {
+        throw new RuntimeException('OpenRouter API key not configured.');
+    }
+
+    $body = [
+        'model' => $model,
+        'messages' => [
+            [
+                'role' => 'system',
+                'content' => 'You are an expert taxonomy analyst who titles clusters of historical news coverage. Reply with a short, vivid label of at most six words. Do not use quotation marks.',
+            ],
+            [
+                'role' => 'user',
+                'content' => $prompt,
+            ],
+        ],
+        'max_tokens' => 64,
+        'temperature' => $temperature,
+    ];
+
+    $ch = curl_init('https://openrouter.ai/api/v1/chat/completions');
+    if ($ch === false) {
+        throw new RuntimeException('Unable to initialize OpenRouter client.');
+    }
+
+    $headers = [
+        'Content-Type: application/json',
+        'Accept: application/json',
+        'Authorization: Bearer ' . $apiKey,
+        'HTTP-Referer: https://semantic-search.local/',
+        'X-Title: Theme Drift Labeler',
+    ];
+
+    curl_setopt_array($ch, [
+        CURLOPT_POST => true,
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_TIMEOUT => 30,
+        CURLOPT_CONNECTTIMEOUT => 10,
+        CURLOPT_HTTPHEADER => $headers,
+        CURLOPT_POSTFIELDS => json_encode($body, JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE),
+    ]);
+
+    $response = curl_exec($ch);
+    if ($response === false) {
+        $error = curl_error($ch);
+        curl_close($ch);
+        throw new RuntimeException('OpenRouter request failed: ' . ($error ?: 'unknown error'));
+    }
+    $statusCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    curl_close($ch);
+
+    $decoded = json_decode($response, true);
+    if (!is_array($decoded)) {
+        throw new RuntimeException('Invalid response from OpenRouter.');
+    }
+    if ($statusCode >= 400) {
+        $message = $decoded['error'] ?? ($decoded['message'] ?? ('HTTP ' . $statusCode));
+        throw new RuntimeException('OpenRouter error: ' . $message);
+    }
+
+    $choices = $decoded['choices'] ?? [];
+    if (!is_array($choices) || empty($choices)) {
+        throw new RuntimeException('OpenRouter returned no choices.');
+    }
+
+    $message = $choices[0]['message'] ?? null;
+    if (!is_array($message)) {
+        throw new RuntimeException('OpenRouter response missing message.');
+    }
+
+    $content = $message['content'] ?? '';
+    $text = '';
+    if (is_string($content)) {
+        $text = $content;
+    } elseif (is_array($content)) {
+        foreach ($content as $chunk) {
+            if (is_array($chunk) && isset($chunk['text'])) {
+                $text .= (string)$chunk['text'];
+            } elseif (is_string($chunk)) {
+                $text .= $chunk;
+            }
+        }
+    }
+
+    $text = trim((string)$text);
+    if ($text === '') {
+        throw new RuntimeException('OpenRouter returned an empty label.');
+    }
+
+    $firstLineParts = preg_split('/[\r\n]+/', $text);
+    $firstLine = is_array($firstLineParts) && count($firstLineParts) > 0 ? $firstLineParts[0] : $text;
+    $clean = trim($firstLine, " \t\"'`«»“”‘’");
+
+    if ($clean === '') {
+        throw new RuntimeException('OpenRouter label collapsed after trimming.');
+    }
+
+    if (mb_strlen($clean, 'UTF-8') > 80) {
+        $clean = mb_substr($clean, 0, 80, 'UTF-8');
+    }
+
+    return $clean;
 }
 
 $action = $_GET['action'] ?? '';
@@ -404,6 +557,198 @@ if ($action === 'data') {
     }
 }
 
+if ($action === 'cluster_label') {
+    if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
+        respond_json(405, ['ok' => false, 'error' => 'Cluster labeling requires POST.']);
+    }
+
+    try {
+        $input = file_get_contents('php://input');
+        $payload = json_decode($input ?? '', true);
+        if (!is_array($payload)) {
+            respond_json(400, ['ok' => false, 'error' => 'Invalid JSON payload.']);
+        }
+
+        $period = $payload['period'] ?? 'year';
+        $period = $period === 'month' ? 'month' : 'year';
+
+        $aggregation = $payload['aggregation'] ?? 'combined';
+        $isCombined = $aggregation !== 'per_pub';
+
+        $pubname = null;
+        if (!$isCombined) {
+            $pubname = trim((string)($payload['pubname'] ?? ''));
+            if ($pubname === '') {
+                respond_json(400, ['ok' => false, 'error' => 'Missing publication for per-publication request.']);
+            }
+        }
+
+        $periodKeysInput = $payload['period_keys'] ?? [];
+        if (!is_array($periodKeysInput) || empty($periodKeysInput)) {
+            respond_json(400, ['ok' => false, 'error' => 'Provide one or more period keys to label.']);
+        }
+
+        $periodKeys = [];
+        foreach ($periodKeysInput as $rawKey) {
+            if (!is_string($rawKey) && !is_numeric($rawKey)) {
+                continue;
+            }
+            $key = trim((string)$rawKey);
+            if ($key !== '') {
+                $periodKeys[] = $key;
+            }
+        }
+
+        $periodKeys = array_values(array_unique($periodKeys));
+        if (empty($periodKeys)) {
+            respond_json(400, ['ok' => false, 'error' => 'Unable to parse requested period keys.']);
+        }
+        sort($periodKeys, SORT_STRING);
+
+        $signatureParts = [$period, $isCombined ? 'combined' : 'per_pub', $isCombined ? '' : $pubname, implode(',', $periodKeys)];
+        $signature = hash('sha256', implode('|', $signatureParts));
+
+        $cacheDir = rtrim(sys_get_temp_dir(), DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . 'theme_drift_labels';
+        if (!is_dir($cacheDir)) {
+            @mkdir($cacheDir, 0775, true);
+        }
+        $cachePath = $cacheDir . DIRECTORY_SEPARATOR . $signature . '.json';
+        $cacheTtl = 60 * 60 * 24 * 7;
+        if (is_file($cachePath) && (time() - (int)filemtime($cachePath) < $cacheTtl)) {
+            $cacheData = json_decode((string)file_get_contents($cachePath), true);
+            if (is_array($cacheData) && isset($cacheData['label'])) {
+                respond_json(200, [
+                    'ok' => true,
+                    'label' => $cacheData['label'],
+                    'cached' => true,
+                    'signature' => $signature,
+                ]);
+            }
+        }
+
+        $pdo = pg_pdo($PGHOST, $PGPORT, $PGDATABASE, $PGUSER, $PGPASSWORD);
+
+        $insights = [];
+        $phraseCounts = [];
+        $headlinePool = [];
+        $docCountTotal = 0;
+        $articleCountTotal = 0;
+        $yearValues = [];
+
+        foreach ($periodKeys as $periodKey) {
+            $periodRow = fetch_period_row($pdo, $period, $periodKey, $isCombined, $pubname);
+            if (!$periodRow) {
+                continue;
+            }
+            $insight = compute_period_insight($pdo, $periodRow);
+            if (empty($insight)) {
+                continue;
+            }
+
+            $insights[] = $insight;
+            $docCountTotal += isset($insight['doc_count']) ? (int)$insight['doc_count'] : 0;
+            $articleCountTotal += isset($insight['article_count']) ? (int)$insight['article_count'] : 0;
+
+            if (!empty($periodRow['period_start'])) {
+                $yearValues[] = (int)substr($periodRow['period_start'], 0, 4);
+            }
+            if (!empty($periodRow['period_end'])) {
+                $yearValues[] = (int)substr($periodRow['period_end'], 0, 4);
+            }
+
+            if (isset($insight['phrases']) && is_array($insight['phrases'])) {
+                foreach ($insight['phrases'] as $phrase) {
+                    $phrase = trim((string)$phrase);
+                    if ($phrase === '') {
+                        continue;
+                    }
+                    $phraseCounts[$phrase] = ($phraseCounts[$phrase] ?? 0) + 1;
+                }
+            }
+
+            if (isset($insight['headlines']) && is_array($insight['headlines'])) {
+                foreach ($insight['headlines'] as $headline) {
+                    $headline = trim((string)$headline);
+                    if ($headline === '') {
+                        continue;
+                    }
+                    $headlinePool[] = $headline;
+                }
+            }
+        }
+
+        if (empty($insights)) {
+            respond_json(404, ['ok' => false, 'error' => 'No insights available for requested periods.']);
+        }
+
+        arsort($phraseCounts, SORT_NUMERIC);
+        $topPhrases = array_slice(array_keys($phraseCounts), 0, 10);
+
+        $uniqueHeadlines = [];
+        $headlineSeen = [];
+        foreach ($headlinePool as $headline) {
+            if (isset($headlineSeen[$headline])) {
+                continue;
+            }
+            $headlineSeen[$headline] = true;
+            $uniqueHeadlines[] = $headline;
+            if (count($uniqueHeadlines) >= 6) {
+                break;
+            }
+        }
+
+        $minYear = !empty($yearValues) ? min($yearValues) : null;
+        $maxYear = !empty($yearValues) ? max($yearValues) : null;
+        $rangeText = ($minYear !== null && $maxYear !== null)
+            ? ($minYear === $maxYear ? (string)$minYear : ($minYear . '–' . $maxYear))
+            : 'unknown years';
+
+        $periodCount = count($periodKeys);
+        $periodLabel = $period === 'month' ? 'months' : 'years';
+
+        $promptLines = [];
+        $promptLines[] = sprintf('Cluster spans %d %s covering %s.', $periodCount, $periodLabel, $rangeText);
+        if (!$isCombined && $pubname) {
+            $promptLines[] = 'Publication focus: ' . $pubname . '.';
+        }
+        if ($articleCountTotal > 0) {
+            $promptLines[] = 'Approximate articles represented: ' . number_format($articleCountTotal) . '.';
+        }
+        if ($docCountTotal > 0) {
+            $promptLines[] = 'Sampled documents analysed: ' . $docCountTotal . '.';
+        }
+        if (!empty($topPhrases)) {
+            $promptLines[] = 'Recurring phrases: ' . implode('; ', $topPhrases) . '.';
+        }
+        if (!empty($uniqueHeadlines)) {
+            $promptLines[] = 'Representative headlines:' . PHP_EOL . '- ' . implode(PHP_EOL . '- ', $uniqueHeadlines) . '.';
+        }
+        $promptLines[] = 'Respond with a concise descriptive label (max six words) that captures this cluster\'s theme. Do not include quotation marks.';
+
+        $prompt = implode(PHP_EOL, $promptLines);
+
+        $label = call_openrouter_label($prompt);
+
+        if (is_dir($cacheDir)) {
+            file_put_contents($cachePath, json_encode([
+                'label' => $label,
+                'signature' => $signature,
+                'created_at' => time(),
+                'period_keys' => $periodKeys,
+            ], JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE));
+        }
+
+        respond_json(200, [
+            'ok' => true,
+            'label' => $label,
+            'cached' => false,
+            'signature' => $signature,
+        ]);
+    } catch (Throwable $e) {
+        respond_json(500, ['ok' => false, 'error' => $e->getMessage()]);
+    }
+}
+
 if ($action === 'nearest_docs' || $action === 'topic_labels' || $action === 'drift' || $action === 'insight') {
     try {
         $period = $_GET['period'] ?? 'year';
@@ -481,29 +826,7 @@ if ($action === 'nearest_docs' || $action === 'topic_labels' || $action === 'dri
         }
 
         if ($action === 'insight') {
-            $limit = 15;
-            $sql = "SELECT d.id, d.pubname, d.date::text AS date, COALESCE(NULLIF(d.summary_clean, ''), NULLIF(d.summary_raw, ''), '') AS summary, d.meta->>'title' AS title, 1 - (d.embedding_hv <=> p.embedding_hv) AS similarity FROM public.period_embeddings p JOIN public.docs d ON d.embedding_hv IS NOT NULL AND d.date IS NOT NULL AND d.date >= p.period_start AND d.date <= p.period_end AND (p.is_combined = true OR d.pubname = p.pubname) WHERE p.id = :id ORDER BY d.embedding_hv <=> p.embedding_hv ASC LIMIT :limit";
-            $stmt = $pdo->prepare($sql);
-            $stmt->bindValue(':id', $periodId, PDO::PARAM_INT);
-            $stmt->bindValue(':limit', $limit, PDO::PARAM_INT);
-            $stmt->execute();
-            $rows = $stmt->fetchAll();
-
-            $summaries = [];
-            foreach ($rows as $row) {
-                $summary = trim((string)($row['summary'] ?? ''));
-                if ($summary !== '') {
-                    $summaries[] = $summary;
-                }
-            }
-
-            $phrases = extract_key_phrases($summaries, 3);
-            $headlines = select_representative_headlines($rows, 2);
-
-            $monthIso = null;
-            if (is_string($periodStart) && strlen($periodStart) >= 7) {
-                $monthIso = substr($periodStart, 0, 7);
-            }
+            $insight = compute_period_insight($pdo, $periodRow);
 
             respond_json(200, [
                 'ok' => true,
@@ -511,13 +834,13 @@ if ($action === 'nearest_docs' || $action === 'topic_labels' || $action === 'dri
                     'period_key' => $periodKey,
                     'start' => $periodStart,
                     'end' => $periodEnd,
-                    'label' => format_period_label($period, $periodStart),
+                    'label' => $insight['label'] ?? format_period_label($period, $periodStart),
                 ],
                 'summary' => [
-                    'month_iso' => $monthIso,
-                    'phrases' => $phrases,
-                    'headlines' => $headlines,
-                    'doc_count' => count($rows),
+                    'month_iso' => $insight['month_iso'] ?? null,
+                    'phrases' => isset($insight['phrases']) && is_array($insight['phrases']) ? $insight['phrases'] : [],
+                    'headlines' => isset($insight['headlines']) && is_array($insight['headlines']) ? $insight['headlines'] : [],
+                    'doc_count' => isset($insight['doc_count']) ? (int)$insight['doc_count'] : 0,
                 ],
             ]);
         }
@@ -989,6 +1312,9 @@ if ($defaultStartYear > $defaultEndYear) {
         let yearBrushRange = null;
         let lastQueryContext = null;
         const insightCache = new Map();
+        const clusterLabelCache = new Map();
+        const clusterLabelRequests = new Map();
+        let clusterLabelGeneration = 0;
         const defaultHelperMessage = helperIntro ? helperIntro.textContent : 'Select a point in the chart to unlock quick lookups.';
         const monthNames = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
 
@@ -1249,17 +1575,145 @@ if ($defaultStartYear > $defaultEndYear) {
             const palette = latestPlot.clusterPalette || [];
             clusterLegend.innerHTML = entries.map(([cluster, count]) => {
                 const color = palette[cluster % palette.length];
-                return `<div><span class="legend-swatch" style="background:${escapeHtml(color)}"></span>Cluster ${cluster + 1} · ${count}</div>`;
+                const { label, pending, attempted } = getClusterLabelState(cluster);
+                let labelLine = '';
+                if (label) {
+                    labelLine = `<div class="small text-muted">${escapeHtml(label)}</div>`;
+                } else if (pending) {
+                    labelLine = '<div class="small text-muted">Labeling…</div>';
+                } else if (attempted) {
+                    labelLine = '<div class="small text-muted">Label unavailable</div>';
+                }
+                return `<div><span class="legend-swatch" style="background:${escapeHtml(color)}"></span>Cluster ${cluster + 1} · ${count}${labelLine}</div>`;
             }).join('');
             clusterLegend.classList.remove('d-none');
             if (clusterSummaryHint) {
-                clusterSummaryHint.textContent = `Colouring by ${latestPlot.clusterCount || entries.length} clusters. Lasso a blob to summarise it.`;
+                clusterSummaryHint.textContent = `Colouring by ${latestPlot.clusterCount || entries.length} clusters. Lasso a blob to summarise it. Labels will appear in the legend.`;
             }
         };
 
         const makeInsightCacheKey = (periodKey) => {
             const ctx = lastQueryContext || {};
             return `${ctx.period || 'year'}|${ctx.aggregation || 'combined'}|${ctx.pubname || ''}|${periodKey}`;
+        };
+
+        const resetClusterLabels = () => {
+            clusterLabelGeneration += 1;
+            clusterLabelCache.clear();
+            clusterLabelRequests.clear();
+        };
+
+        const buildClusterLabelDescriptor = (clusterIndex) => {
+            if (
+                !latestPlot ||
+                !Array.isArray(latestPlot.clusterAssignments) ||
+                !latestPlot.payload ||
+                !Array.isArray(latestPlot.payload.items)
+            ) {
+                return null;
+            }
+            if (clusterIndex == null) {
+                return null;
+            }
+            const assignments = latestPlot.clusterAssignments;
+            const items = latestPlot.payload.items;
+            const keys = [];
+            for (let i = 0; i < assignments.length; i += 1) {
+                if (assignments[i] === clusterIndex) {
+                    const item = items[i];
+                    if (item && item.period_key) {
+                        keys.push(String(item.period_key));
+                    }
+                }
+            }
+            if (!keys.length) {
+                return null;
+            }
+            keys.sort();
+            const ctx = lastQueryContext || {};
+            const contextKey = `${ctx.period || 'year'}|${ctx.aggregation || 'combined'}|${ctx.pubname || ''}`;
+            return {
+                signature: `${contextKey}|${keys.join(',')}`,
+                periodKeys: keys,
+            };
+        };
+
+        const requestClusterLabel = (descriptor) => {
+            if (!descriptor || !descriptor.signature || !Array.isArray(descriptor.periodKeys)) {
+                return;
+            }
+            const { signature, periodKeys } = descriptor;
+            if (clusterLabelCache.has(signature) || clusterLabelRequests.has(signature)) {
+                return;
+            }
+            if (!lastQueryContext) {
+                return;
+            }
+            const payload = {
+                period: lastQueryContext.period || 'year',
+                aggregation: lastQueryContext.aggregation || 'combined',
+                period_keys: periodKeys,
+            };
+            if (lastQueryContext.aggregation === 'per_pub' && lastQueryContext.pubname) {
+                payload.pubname = lastQueryContext.pubname;
+            }
+            const generation = clusterLabelGeneration;
+            clusterLabelRequests.set(signature, true);
+            fetch('theme_drift.php?action=cluster_label', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload),
+            })
+                .then((response) => {
+                    if (!response.ok) {
+                        throw new Error(`Cluster label request failed (${response.status})`);
+                    }
+                    return response.json();
+                })
+                .then((data) => {
+                    if (clusterLabelGeneration !== generation) {
+                        return;
+                    }
+                    if (!data || data.ok !== true) {
+                        const message = data && data.error ? data.error : 'Cluster labeling failed';
+                        throw new Error(message);
+                    }
+                    const labelText = typeof data.label === 'string' ? data.label.trim() : '';
+                    clusterLabelCache.set(signature, labelText !== '' ? labelText : null);
+                })
+                .catch((err) => {
+                    console.error(err);
+                    if (clusterLabelGeneration === generation) {
+                        clusterLabelCache.set(signature, null);
+                    }
+                })
+                .finally(() => {
+                    if (clusterLabelGeneration === generation) {
+                        clusterLabelRequests.delete(signature);
+                        updateClusterLegend();
+                    }
+                });
+        };
+
+        const getClusterLabelState = (clusterIndex) => {
+            const descriptor = buildClusterLabelDescriptor(clusterIndex);
+            if (!descriptor) {
+                return { label: null, pending: false, attempted: false };
+            }
+            const { signature } = descriptor;
+            if (clusterLabelCache.has(signature)) {
+                const cached = clusterLabelCache.get(signature);
+                if (typeof cached === 'string' && cached.trim() !== '') {
+                    return { label: cached.trim(), pending: false, attempted: true };
+                }
+                return { label: null, pending: false, attempted: true };
+            }
+            requestClusterLabel(descriptor);
+            return {
+                label: null,
+                pending: clusterLabelRequests.has(signature),
+                attempted: clusterLabelRequests.has(signature),
+            };
         };
 
         const loadInsight = async (item) => {
@@ -1596,6 +2050,17 @@ if ($defaultStartYear > $defaultEndYear) {
             if (!item) {
                 return;
             }
+            ensureClusters();
+            let clusterLabelHtml = '';
+            if (latestPlot.clusterAssignments && latestPlot.clusterAssignments[idx] != null) {
+                const clusterId = latestPlot.clusterAssignments[idx];
+                if (typeof clusterId === 'number' && !Number.isNaN(clusterId)) {
+                    const { label } = getClusterLabelState(clusterId);
+                    if (label) {
+                        clusterLabelHtml = `<div><strong>Cluster label:</strong> ${escapeHtml(label)}</div>`;
+                    }
+                }
+            }
             const selection = {
                 id: item.id != null ? item.id : null,
                 period_key: item.period_key || '',
@@ -1614,6 +2079,7 @@ if ($defaultStartYear > $defaultEndYear) {
                 <div><strong>${escapeHtml(selection.label)}</strong></div>
                 <div class="small text-muted">${escapeHtml(publication)}</div>
                 <hr>
+                ${clusterLabelHtml}
                 <div><strong>Period:</strong> ${escapeHtml(selection.period_start || '?')} → ${escapeHtml(selection.period_end || '?')}</div>
                 <div><strong>Articles:</strong> ${item.article_count ? item.article_count.toLocaleString() : 'n/a'}</div>
                 <div><strong>Tokens:</strong> ${item.token_count ? item.token_count.toLocaleString() : 'n/a'}</div>
@@ -1709,9 +2175,11 @@ if ($defaultStartYear > $defaultEndYear) {
         };
 
         const renderPlot = async (payload) => {
+            resetClusterLabels();
             if (!payload || !payload.items || payload.items.length === 0) {
                 Plotly.purge(chartDiv);
                 statusEl.textContent = 'No embeddings matched the current filters.';
+                latestPlot = null;
                 updateSummary(null);
                 resetDetail();
                 renderClusterSummary([]);
