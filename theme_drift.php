@@ -1437,11 +1437,18 @@ if ($defaultStartYear > $defaultEndYear) {
         };
 
         const setDragMode = (mode) => {
-            currentDragMode = mode;
-            if (panModeButton) panModeButton.classList.toggle('active', mode === 'pan');
-            if (lassoModeButton) lassoModeButton.classList.toggle('active', mode === 'lasso');
-            if (chartDiv) {
-                Plotly.relayout(chartDiv, { dragmode: mode });
+            const nextMode = mode === 'lasso' ? 'lasso' : 'pan';
+            currentDragMode = nextMode;
+            if (panModeButton) panModeButton.classList.toggle('active', nextMode === 'pan');
+            if (lassoModeButton) lassoModeButton.classList.toggle('active', nextMode === 'lasso');
+            if (
+                hasRendered &&
+                chartDiv &&
+                typeof Plotly !== 'undefined' &&
+                typeof Plotly.relayout === 'function' &&
+                chartDiv._fullLayout
+            ) {
+                Plotly.relayout(chartDiv, { dragmode: nextMode });
             }
         };
 
