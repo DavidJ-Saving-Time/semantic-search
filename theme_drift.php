@@ -421,8 +421,8 @@ ORDER BY d;</code></pre>
         </div>
     </div>
 </div>
-<script src="https://cdn.jsdelivr.net/npm/umap-js@1.3.3/lib/umap.min.js" integrity="sha384-GU5uO3gl5mOWYMVkXuxXWEX0k/eMn7IbkL0rIZdyIJ/kEHF4Pz3mmI95T9Ipp1A7" crossorigin="anonymous"></script>
-<script src="https://cdn.plot.ly/plotly-2.27.0.min.js" integrity="sha384-FOukw0cVwY0GO+bMC9gU33JM16KU0p1Dwmtb00tCyy6PuCl0UCaMzFxLpy0X58F1" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/umap-js@1.3.3/lib/umap-js.min.js"></script>
+<script src="https://cdn.plot.ly/plotly-2.27.0.min.js" crossorigin="anonymous"></script>
 <script>
 (function() {
     const ensureLibs = (callback) => {
