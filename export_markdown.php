@@ -86,7 +86,7 @@ if ($selectedPub !== '' && $selectedYear !== '') {
 
         try {
             $stmt = $pdo->prepare(
-                "SELECT pubname, date, summary_clean FROM docs " .
+                "SELECT pubname, date, summary_clean, meta->>'title' AS title FROM docs " .
                 "WHERE pubname = :pub AND date >= :start AND date < :end " .
                 "AND summary_clean IS NOT NULL ORDER BY date ASC"
             );
@@ -103,6 +103,7 @@ if ($selectedPub !== '' && $selectedYear !== '') {
                     $pub = $row['pubname'] ?? '';
                     $dateValue = $row['date'] ?? null;
                     $summary = trim((string)($row['summary_clean'] ?? ''));
+                    $title = trim((string)($row['title'] ?? ''));
                     if ($summary === '') {
                         continue;
                     }
@@ -111,11 +112,13 @@ if ($selectedPub !== '' && $selectedYear !== '') {
                         $dateObj = new DateTime($dateValue);
                         $dateStr = $dateObj->format('Y-m-d');
                     }
-                    $lines[] = '### ' . $pub;
-                    $lines[] = '- Date: ' . $dateStr;
-                    $lines[] = '- Place: London UK';
+                    $lines[] = sprintf('## %s (%s, London UK)', $pub, $dateStr);
                     $lines[] = '';
+                    if ($title !== '') {
+                        $lines[] = '### ' . $title;
+                    }
                     $lines[] = $summary;
+                    $lines[] = '';
                     $lines[] = '---';
                     $lines[] = '';
                 }
