@@ -198,6 +198,294 @@ function cache_put(PDO $pdo, string $qkey, array $embedding): void
     }
 }
 
+/**
+ * Opens a pgsql connection with common settings applied.
+ *
+ * @return PgSql\Connection|resource
+ */
+function pg_connect_with_options(string $host, string $port, string $db, string $user, string $pass)
+{
+    $connStr = sprintf(
+        'host=%s port=%s dbname=%s user=%s',
+        $host,
+        $port,
+        $db,
+        $user
+    );
+    if ($pass !== '') {
+        $connStr .= ' password=' . $pass;
+    }
+
+    $pgconn = pg_connect($connStr);
+    if ($pgconn === false) {
+        throw new RuntimeException('pg_connect failed: ' . pg_last_error());
+    }
+
+    pg_query($pgconn, 'SET jit = off');
+    pg_query($pgconn, 'SET statement_timeout = 0');
+
+    return $pgconn;
+}
+
+function heatmap_cache_key(string $normalizedQuery, string $from, string $to, string $granularity, int $k, string $model): string
+{
+    return implode('|', [
+        'heatmap',
+        strtolower($model),
+        strtolower($granularity),
+        $from,
+        $to,
+        'k=' . $k,
+        $normalizedQuery,
+    ]);
+}
+
+function heatmap_color_for_ratio(float $ratio): array
+{
+    $ratio = max(0.0, min(1.0, $ratio));
+    $start = [227, 236, 255]; // soft blue
+    $end   = [13, 110, 253];  // bootstrap primary
+    $r = (int)round($start[0] + ($end[0] - $start[0]) * $ratio);
+    $g = (int)round($start[1] + ($end[1] - $start[1]) * $ratio);
+    $b = (int)round($start[2] + ($end[2] - $start[2]) * $ratio);
+    $hex = sprintf('#%02x%02x%02x', $r, $g, $b);
+    $useLightText = $ratio >= 0.55;
+    return [$hex, $useLightText];
+}
+
+function run_heatmap_query($pgconn, string $vecLiteral, string $from, string $to, string $granularity, int $k): array
+{
+    $granularity = $granularity === 'year' ? 'year' : 'month';
+    $k = max(1, (int)$k);
+
+    if ($granularity === 'month') {
+        $sql = <<<SQL
+WITH q AS (
+  SELECT ($1::public.halfvec(3072)) AS q
+),
+scored AS (
+  SELECT
+    to_char(d.date, 'YYYY-MM') AS period_key,
+    1 - (d.embedding_hv <=> q.q) AS sim,
+    ROW_NUMBER() OVER (
+      PARTITION BY to_char(d.date, 'YYYY-MM')
+      ORDER BY d.embedding_hv <=> q.q
+    ) AS rn
+  FROM public.docs d, q
+  WHERE d.embedding_hv IS NOT NULL
+    AND d.date >= $2::date
+    AND d.date < $3::date + INTERVAL '1 day'
+)
+SELECT
+  period_key,
+  AVG(sim) AS score,
+  COUNT(*) FILTER (WHERE rn <= $4::int) AS k_count
+FROM scored
+WHERE rn <= $4::int
+GROUP BY period_key
+ORDER BY period_key;
+SQL;
+    } else {
+        $sql = <<<SQL
+WITH q AS (
+  SELECT ($1::public.halfvec(3072)) AS q
+),
+scored AS (
+  SELECT
+    to_char(d.date, 'YYYY') AS period_key,
+    1 - (d.embedding_hv <=> q.q) AS sim,
+    ROW_NUMBER() OVER (
+      PARTITION BY to_char(d.date, 'YYYY')
+      ORDER BY d.embedding_hv <=> q.q
+    ) AS rn
+  FROM public.docs d, q
+  WHERE d.embedding_hv IS NOT NULL
+    AND d.date >= $2::date
+    AND d.date < $3::date + INTERVAL '1 day'
+)
+SELECT
+  period_key,
+  AVG(sim) AS score,
+  COUNT(*) FILTER (WHERE rn <= $4::int) AS k_count
+FROM scored
+WHERE rn <= $4::int
+GROUP BY period_key
+ORDER BY period_key;
+SQL;
+    }
+
+    $res = pg_query_params($pgconn, $sql, [$vecLiteral, $from, $to, $k]);
+    if ($res === false) {
+        throw new RuntimeException('Heatmap query failed: ' . pg_last_error($pgconn));
+    }
+
+    $rows = pg_fetch_all($res) ?: [];
+    $out = [];
+    foreach ($rows as $row) {
+        $periodKey = isset($row['period_key']) ? (string)$row['period_key'] : '';
+        if ($periodKey === '') {
+            continue;
+        }
+        $score = isset($row['score']) ? (float)$row['score'] : null;
+        $kCount = isset($row['k_count']) ? (int)$row['k_count'] : 0;
+        $out[] = [
+            'period_key' => $periodKey,
+            'score' => $score,
+            'k_count' => $kCount,
+        ];
+    }
+
+    return $out;
+}
+
+if (($_GET['action'] ?? '') === 'heatmap_bucket') {
+    header('Content-Type: application/json; charset=utf-8');
+    $status = 200;
+    $response = ['ok' => false];
+    $pgconn = null;
+
+    try {
+        if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
+            throw new RuntimeException('Invalid request method.');
+        }
+
+        $q = isset($_POST['q']) ? trim((string)$_POST['q']) : '';
+        if ($q === '' || mb_strlen($q) > 512) {
+            throw new RuntimeException('Invalid query.');
+        }
+
+        $granularity = isset($_POST['granularity']) ? strtolower((string)$_POST['granularity']) : 'month';
+        if (!in_array($granularity, ['month', 'year'], true)) {
+            throw new RuntimeException('Invalid granularity.');
+        }
+
+        $periodKey = isset($_POST['period_key']) ? trim((string)$_POST['period_key']) : '';
+        $periodStart = null;
+        $periodEndExclusive = null;
+        if ($granularity === 'month') {
+            if (!preg_match('/^\d{4}-\d{2}$/', $periodKey)) {
+                throw new RuntimeException('Invalid period key.');
+            }
+            $periodStart = DateTimeImmutable::createFromFormat('!Y-m', $periodKey, new DateTimeZone('UTC'));
+            if ($periodStart === false) {
+                throw new RuntimeException('Unable to parse period.');
+            }
+            $periodEndExclusive = $periodStart->modify('+1 month');
+        } else {
+            if (!preg_match('/^\d{4}$/', $periodKey)) {
+                throw new RuntimeException('Invalid period key.');
+            }
+            $periodStart = DateTimeImmutable::createFromFormat('!Y', $periodKey, new DateTimeZone('UTC'));
+            if ($periodStart === false) {
+                throw new RuntimeException('Unable to parse period.');
+            }
+            $periodEndExclusive = $periodStart->modify('+1 year');
+        }
+
+        if (!$periodEndExclusive) {
+            throw new RuntimeException('Invalid period range.');
+        }
+
+        $rangeFromStr = isset($_POST['range_from']) ? trim((string)$_POST['range_from']) : '';
+        $rangeToStr   = isset($_POST['range_to']) ? trim((string)$_POST['range_to']) : '';
+        $rangeFrom = $rangeFromStr !== '' ? DateTimeImmutable::createFromFormat('!Y-m-d', $rangeFromStr, new DateTimeZone('UTC')) : null;
+        $rangeTo   = $rangeToStr !== '' ? DateTimeImmutable::createFromFormat('!Y-m-d', $rangeToStr, new DateTimeZone('UTC')) : null;
+        if ($rangeFromStr !== '' && $rangeFrom === false) {
+            throw new RuntimeException('Invalid range start.');
+        }
+        if ($rangeToStr !== '' && $rangeTo === false) {
+            throw new RuntimeException('Invalid range end.');
+        }
+        if ($rangeFrom && $periodEndExclusive <= $rangeFrom) {
+            throw new RuntimeException('Requested period precedes range.');
+        }
+        if ($rangeTo && $periodStart > $rangeTo) {
+            throw new RuntimeException('Requested period exceeds range.');
+        }
+
+        $pdo = pg_pdo($PGHOST, $PGPORT, $PGDATABASE, $PGUSER, $PGPASSWORD, $PG_STMT_TIMEOUT);
+        $normalized = normalize_query_key($q);
+        $embedding = cache_get($pdo, $normalized);
+        if ($embedding === null) {
+            if ($OPENAI_API_KEY === '') {
+                throw new RuntimeException('OPENAI_API_KEY is not configured.');
+            }
+            $embedding = openai_embed($OPENAI_API_KEY, $q, $OPENAI_MODEL, $OPENAI_TIMEOUT);
+            cache_put($pdo, $normalized, $embedding);
+        }
+
+        $vecLiteral = vector_literal($embedding);
+        $pgconn = pg_connect_with_options($PGHOST, $PGPORT, $PGDATABASE, $PGUSER, $PGPASSWORD);
+
+        $bucketStartStr = $periodStart->format('Y-m-d');
+        $bucketEndExclusiveStr = $periodEndExclusive->format('Y-m-d');
+        $bucketEndInclusiveStr = $periodEndExclusive->modify('-1 day')->format('Y-m-d');
+
+        $sql = <<<SQL
+SELECT
+  d.id,
+  d.pubname,
+  d.date::text AS date,
+  d.summary_clean AS summary,
+  d.meta->>'title' AS title,
+  1 - (d.embedding_hv <=> ($1::public.halfvec(3072))) AS score
+FROM public.docs d
+WHERE d.embedding_hv IS NOT NULL
+  AND d.date >= $2::date
+  AND d.date < $3::date
+ORDER BY d.embedding_hv <=> ($1::public.halfvec(3072))
+LIMIT 5;
+SQL;
+
+        $res = pg_query_params($pgconn, $sql, [$vecLiteral, $bucketStartStr, $bucketEndExclusiveStr]);
+        if ($res === false) {
+            throw new RuntimeException('Failed to fetch articles.');
+        }
+
+        $rows = pg_fetch_all($res) ?: [];
+        $items = [];
+        foreach ($rows as $row) {
+            $summary = trim((string)($row['summary'] ?? ''));
+            if (mb_strlen($summary) > 600) {
+                $summary = rtrim(mb_substr($summary, 0, 600)) . '…';
+            }
+
+            $items[] = [
+                'id' => isset($row['id']) ? (int)$row['id'] : null,
+                'pubname' => $row['pubname'] ?? null,
+                'date' => $row['date'] ?? null,
+                'title' => $row['title'] ?? null,
+                'summary' => $summary,
+                'score' => isset($row['score']) ? (float)$row['score'] : null,
+            ];
+        }
+
+        $response = [
+            'ok' => true,
+            'items' => $items,
+            'period' => [
+                'key' => $periodKey,
+                'label' => $periodStart->format($granularity === 'month' ? 'F Y' : 'Y'),
+                'start' => $bucketStartStr,
+                'end' => $bucketEndInclusiveStr,
+            ],
+            'granularity' => $granularity,
+        ];
+    } catch (Throwable $e) {
+        $status = 400;
+        $response = ['ok' => false, 'error' => $e->getMessage()];
+        error_log('[semantic_search][heatmap_bucket] ' . $e->getMessage());
+    } finally {
+        if ($pgconn) {
+            pg_close($pgconn);
+        }
+    }
+
+    http_response_code($status);
+    echo json_encode($response, JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
 $selectedPub = isset($_POST['pubname']) ? trim((string)$_POST['pubname']) : '';
 $selectedYear = isset($_POST['year']) ? trim((string)$_POST['year']) : '';
 if ($selectedYear !== '' && !preg_match('/^\d{4}$/', $selectedYear)) {
@@ -285,8 +573,55 @@ if ($selectedGenre !== '') {
 }
 unset($genreLookup);
 
+$yearInts = array_map('intval', $years);
+$heatmapMinYear = !empty($yearInts) ? min($yearInts) : (int)date('Y');
+$heatmapMaxYear = !empty($yearInts) ? max($yearInts) : $heatmapMinYear;
+$heatmapFromYear = $heatmapMinYear;
+$heatmapToYear = $heatmapMaxYear;
+if (isset($_POST['heatmap_from'])) {
+    $heatmapFromYear = clamp_int($_POST['heatmap_from'], $heatmapMinYear, $heatmapMaxYear, $heatmapFromYear);
+}
+if (isset($_POST['heatmap_to'])) {
+    $heatmapToYear = clamp_int($_POST['heatmap_to'], $heatmapMinYear, $heatmapMaxYear, $heatmapToYear);
+}
+if ($heatmapFromYear > $heatmapToYear) {
+    [$heatmapFromYear, $heatmapToYear] = [$heatmapToYear, $heatmapFromYear];
+}
+$heatmapGranularity = isset($_POST['heatmap_granularity']) ? strtolower((string)$_POST['heatmap_granularity']) : 'month';
+if (!in_array($heatmapGranularity, ['month', 'year'], true)) {
+    $heatmapGranularity = 'month';
+}
+$heatmapK = clamp_int($_POST['heatmap_k'] ?? $DEF_K, 1, 50, $DEF_K);
+$heatmapRangeFrom = sprintf('%04d-01-01', $heatmapFromYear);
+$heatmapRangeTo = sprintf('%04d-12-31', $heatmapToYear);
 
+$heatmapPoints = [];
+$heatmapMap = [];
+$heatmapComputed = false;
+$heatmapCacheStatus = null;
+$heatmapQueryMs = null;
+$heatmapMaxScoreValue = null;
+$heatmapMinScoreValue = null;
+$heatmapMaxScoreForColor = 1.0;
+$heatmapConfigForJs = null;
+$heatmapHasScores = false;
 
+$heatmapYears = $heatmapFromYear <= $heatmapToYear ? range($heatmapFromYear, $heatmapToYear) : [];
+
+$heatmapMonthNames = [
+    1 => 'Jan',
+    2 => 'Feb',
+    3 => 'Mar',
+    4 => 'Apr',
+    5 => 'May',
+    6 => 'Jun',
+    7 => 'Jul',
+    8 => 'Aug',
+    9 => 'Sep',
+    10 => 'Oct',
+    11 => 'Nov',
+    12 => 'Dec',
+];
 
 // -------------------------- Request handling --------------------------
 $q         = '';
@@ -325,10 +660,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     } elseif ($OPENAI_API_KEY === '') {
         $errorMsg = 'OPENAI_API_KEY is not configured.';
     } else {
+        $pgconn = null;
         try {
             $pdo = pg_pdo($PGHOST, $PGPORT, $PGDATABASE, $PGUSER, $PGPASSWORD, $PG_STMT_TIMEOUT);
 
-            // cache
             $qkey = normalize_query_key($q);
             $emb = cache_get($pdo, $qkey);
             if ($emb !== null) {
@@ -340,25 +675,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 cache_put($pdo, $qkey, $emb);
             }
 
-            // Build vector literal
-            // Build the vector literal (same as before)
-            $vec = vector_literal($emb); // "[0.12,0.34,...]"
+            $vec = vector_literal($emb);
 
-            // Use native pgsql just for this query
-            $pgconn = pg_connect(sprintf(
-                "host=%s port=%s dbname=%s user=%s%s",
-                $PGHOST,
-                $PGPORT,
-                $PGDATABASE,
-                $PGUSER,
-                ($PGPASSWORD !== '' ? " password={$PGPASSWORD}" : "")
-            ));
-            if ($pgconn === false) {
-                throw new RuntimeException('pg_connect failed: ' . pg_last_error());
-            }
-
-            pg_query($pgconn, "SET jit = off");
-            pg_query($pgconn, "SET statement_timeout = 0");
+            $pgconn = pg_connect_with_options($PGHOST, $PGPORT, $PGDATABASE, $PGUSER, $PGPASSWORD);
             pg_query($pgconn, 'SET enable_sort = off');
             //pg_query($pgconn, 'SET hnsw.ef_search = 80');
 
@@ -470,7 +789,35 @@ SQL;
             $results = pg_fetch_all($res) ?: [];
             $timing['sql_ms'] = (int)round((microtime(true) - $t0) * 1000);
 
-            pg_close($pgconn);
+            $heatmapCacheKey = heatmap_cache_key($qkey, $heatmapRangeFrom, $heatmapRangeTo, $heatmapGranularity, $heatmapK, $OPENAI_MODEL);
+            $cachedHeatmap = cache_get($pdo, $heatmapCacheKey);
+            if (is_array($cachedHeatmap) && isset($cachedHeatmap['points']) && is_array($cachedHeatmap['points'])) {
+                $heatmapPoints = $cachedHeatmap['points'];
+                $heatmapCacheStatus = 'hit';
+            } else {
+                $heatmapCacheStatus = 'miss';
+                $tHeatmap = microtime(true);
+                $heatmapPoints = run_heatmap_query($pgconn, $vec, $heatmapRangeFrom, $heatmapRangeTo, $heatmapGranularity, $heatmapK);
+                $heatmapQueryMs = (int)round((microtime(true) - $tHeatmap) * 1000);
+                $cachePayload = [
+                    'points' => $heatmapPoints,
+                    'from' => $heatmapRangeFrom,
+                    'to' => $heatmapRangeTo,
+                    'granularity' => $heatmapGranularity,
+                    'k' => $heatmapK,
+                    'model' => $OPENAI_MODEL,
+                ];
+                cache_put($pdo, $heatmapCacheKey, $cachePayload);
+            }
+            $heatmapComputed = true;
+            $heatmapConfigForJs = [
+                'query' => $q,
+                'granularity' => $heatmapGranularity,
+                'range_from' => $heatmapRangeFrom,
+                'range_to' => $heatmapRangeTo,
+                'k' => $heatmapK,
+                'model' => $OPENAI_MODEL,
+            ];
 
 
 
@@ -478,7 +825,38 @@ SQL;
         } catch (Throwable $e) {
             $errorMsg = 'Search failed. See server logs.';
             error_log('[semantic_search] ' . $e->getMessage());
+        } finally {
+            if ($pgconn) {
+                pg_close($pgconn);
+            }
         }
+    }
+}
+
+
+if ($heatmapComputed) {
+    foreach ($heatmapPoints as $point) {
+        if (!is_array($point) || !isset($point['period_key'])) {
+            continue;
+        }
+        $key = (string)$point['period_key'];
+        $score = isset($point['score']) ? (float)$point['score'] : null;
+        $kCount = isset($point['k_count']) ? (int)$point['k_count'] : 0;
+        $heatmapMap[$key] = [
+            'score' => $score,
+            'k_count' => $kCount,
+        ];
+        if ($score !== null) {
+            $heatmapHasScores = true;
+            $heatmapMaxScoreValue = $heatmapMaxScoreValue === null ? $score : max($heatmapMaxScoreValue, $score);
+            $heatmapMinScoreValue = $heatmapMinScoreValue === null ? $score : min($heatmapMinScoreValue, $score);
+        }
+    }
+
+    if ($heatmapMaxScoreValue !== null && $heatmapMaxScoreValue > 0) {
+        $heatmapMaxScoreForColor = $heatmapMaxScoreValue;
+    } else {
+        $heatmapMaxScoreForColor = 1.0;
     }
 }
 
@@ -657,6 +1035,18 @@ if (!empty($results)) {
 
     .score-badge { font-variant-numeric: tabular-nums; }
     .snippet { white-space: pre-wrap; }
+    .heatmap-card { background-color: #f8f9fa; border: 1px solid rgba(0, 0, 0, 0.05); }
+    .heatmap-table { width: 100%; border-collapse: collapse; table-layout: fixed; font-variant-numeric: tabular-nums; font-size: 0.8rem; }
+    .heatmap-table th,
+    .heatmap-table td { border: 1px solid rgba(0, 0, 0, 0.05); text-align: center; padding: 0.35rem; }
+    .heatmap-table th { background-color: #f1f5f9; font-weight: 600; }
+    .heatmap-cell { cursor: pointer; transition: transform 0.1s ease-in-out; }
+    .heatmap-cell.has-score:hover { transform: scale(1.03); }
+    .heatmap-cell.is-empty { cursor: not-allowed; color: #6c757d; background-color: #f8f9fa; }
+    .heatmap-legend { height: 0.75rem; border-radius: 999px; background: linear-gradient(to right, #e3ecff, #0d6efd); }
+    .heatmap-legend-labels { display: flex; justify-content: space-between; font-size: 0.75rem; color: #6c757d; }
+    .heatmap-meta { font-size: 0.8rem; color: #6c757d; }
+    .heatmap-config-badge { font-size: 0.75rem; }
   </style>
 </head>
 <body>
@@ -765,6 +1155,55 @@ if (!empty($results)) {
     </div>
   </div>
 
+  <div class="bg-light-subtle border rounded-3 p-3 mt-3">
+    <div class="row g-3 align-items-end">
+      <div class="col-6 col-md-3">
+        <label for="heatmap_from" class="form-label">Heatmap from (year)</label>
+        <input
+          type="number"
+          class="form-control"
+          id="heatmap_from"
+          name="heatmap_from"
+          min="<?= h((string)$heatmapMinYear) ?>"
+          max="<?= h((string)$heatmapMaxYear) ?>"
+          value="<?= h((string)$heatmapFromYear) ?>">
+      </div>
+      <div class="col-6 col-md-3">
+        <label for="heatmap_to" class="form-label">Heatmap to (year)</label>
+        <input
+          type="number"
+          class="form-control"
+          id="heatmap_to"
+          name="heatmap_to"
+          min="<?= h((string)$heatmapMinYear) ?>"
+          max="<?= h((string)$heatmapMaxYear) ?>"
+          value="<?= h((string)$heatmapToYear) ?>">
+      </div>
+      <div class="col-6 col-md-3">
+        <label for="heatmap_granularity" class="form-label">Granularity</label>
+        <select class="form-select" id="heatmap_granularity" name="heatmap_granularity">
+          <option value="month" <?= $heatmapGranularity === 'month' ? 'selected' : '' ?>>Monthly</option>
+          <option value="year" <?= $heatmapGranularity === 'year' ? 'selected' : '' ?>>Yearly</option>
+        </select>
+      </div>
+      <div class="col-6 col-md-3 col-lg-2">
+        <label for="heatmap_k" class="form-label">Top-k per bucket</label>
+        <input
+          type="number"
+          class="form-control"
+          id="heatmap_k"
+          name="heatmap_k"
+          min="1"
+          max="50"
+          value="<?= h((string)$heatmapK) ?>">
+      </div>
+    </div>
+    <div class="form-text mt-2">
+      Heatmap scores use the mean cosine similarity of the top <?= h((string)$heatmapK) ?> document embeddings per
+      <?= h($heatmapGranularity === 'year' ? 'year' : 'month') ?> within <?= h($heatmapRangeFrom) ?> to <?= h($heatmapRangeTo) ?>.
+    </div>
+  </div>
+
   <div class="form-text mt-2 d-flex align-items-center flex-wrap gap-2">
     <span>
       Using inferred topics only. Weights:
@@ -788,6 +1227,160 @@ if (!empty($results)) {
     <?php endif; ?>
   </div>
 </form>
+
+<?php
+$heatmapConfigJson = $heatmapConfigForJs !== null ? h(json_encode($heatmapConfigForJs, JSON_UNESCAPED_SLASHES)) : '';
+?>
+
+<?php if ($_SERVER['REQUEST_METHOD'] === 'POST' && !$errorMsg): ?>
+  <section class="card heatmap-card mb-4" id="heatmap-root" <?= $heatmapConfigJson !== '' ? 'data-config="' . $heatmapConfigJson . '"' : '' ?>>
+    <div class="card-body">
+      <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3">
+        <h2 class="h5 mb-0">
+          <i class="fa-solid fa-chart-area me-2"></i>
+          Query relevance heatmap
+        </h2>
+        <div class="d-flex flex-wrap gap-2 heatmap-meta">
+          <span class="badge text-bg-light text-dark heatmap-config-badge">Range: <?= h($heatmapRangeFrom) ?> → <?= h($heatmapRangeTo) ?></span>
+          <span class="badge text-bg-light text-dark heatmap-config-badge">Granularity: <?= h(ucfirst($heatmapGranularity)) ?></span>
+          <span class="badge text-bg-light text-dark heatmap-config-badge">Top-k: <?= h((string)$heatmapK) ?></span>
+          <?php if ($heatmapCacheStatus): ?>
+            <span class="badge text-bg-light text-dark heatmap-config-badge">Heatmap cache: <?= h($heatmapCacheStatus) ?></span>
+          <?php endif; ?>
+          <?php if ($heatmapQueryMs !== null): ?>
+            <span class="badge text-bg-light text-dark heatmap-config-badge">Heatmap SQL: <?= h((string)$heatmapQueryMs) ?>ms</span>
+          <?php endif; ?>
+        </div>
+      </div>
+      <p class="text-body-secondary small mb-3">
+        Scores reflect the mean cosine similarity of the top <?= h((string)$heatmapK) ?> matching documents per
+        <?= $heatmapGranularity === 'year' ? 'year' : 'month' ?>. Click a cell to preview the top articles for that period.
+      </p>
+
+      <?php if ($heatmapComputed && $heatmapConfigForJs !== null): ?>
+        <?php if ($heatmapGranularity === 'month'): ?>
+          <?php if (!empty($heatmapYears)): ?>
+            <div class="table-responsive">
+              <table class="heatmap-table">
+                <thead>
+                  <tr>
+                    <th scope="col">Year</th>
+                    <?php foreach ($heatmapMonthNames as $monthNum => $monthLabel): ?>
+                      <th scope="col"><?= h($monthLabel) ?></th>
+                    <?php endforeach; ?>
+                  </tr>
+                </thead>
+                <tbody>
+                  <?php foreach ($heatmapYears as $year): ?>
+                    <tr>
+                      <th scope="row"><?= h((string)$year) ?></th>
+                      <?php for ($month = 1; $month <= 12; $month++):
+                          $periodKey = sprintf('%04d-%02d', $year, $month);
+                          $cell = $heatmapMap[$periodKey] ?? null;
+                          $score = $cell['score'] ?? null;
+                          $kCount = $cell['k_count'] ?? 0;
+                          $hasScore = $score !== null;
+                          $cellClass = 'heatmap-cell' . ($hasScore ? ' has-score' : ' is-empty');
+                          $label = ($heatmapMonthNames[$month] ?? $month) . ' ' . $year;
+                          $ratio = $hasScore && $heatmapMaxScoreForColor > 0 ? max(0.0, min(1.0, $score / $heatmapMaxScoreForColor)) : 0.0;
+                          [$bgColor, $useLightText] = heatmap_color_for_ratio($ratio);
+                          $textClass = $useLightText ? 'text-white fw-semibold' : '';
+                          $displayScore = $hasScore ? number_format($score, 2, '.', '') : '';
+                          $periodStart = sprintf('%04d-%02d-01', $year, $month);
+                          $periodEndObj = DateTimeImmutable::createFromFormat('Y-m-d', $periodStart);
+                          $periodEnd = $periodEndObj ? $periodEndObj->format('Y-m-t') : $periodStart;
+                          $titleParts = [];
+                          if ($hasScore) {
+                              $titleParts[] = 'Score ' . number_format($score, 3, '.', '');
+                          }
+                          $titleParts[] = 'Docs ' . $kCount;
+                          $titleParts[] = 'Click for top articles';
+                          $title = implode(' • ', $titleParts);
+                      ?>
+                        <td class="<?= $cellClass ?> <?= $textClass ?>"
+                            style="background-color: <?= h($bgColor) ?>;"
+                            <?= $hasScore ? 'data-period-key="' . h($periodKey) . '" data-label="' . h($label) . '" data-score="' . h(number_format($score, 4, '.', '')) . '" data-k-count="' . h((string)$kCount) . '" data-period-start="' . h($periodStart) . '" data-period-end="' . h($periodEnd) . '"' : '' ?>
+                            title="<?= h($title) ?>">
+                          <?= $hasScore ? h($displayScore) : '&ndash;' ?>
+                        </td>
+                      <?php endfor; ?>
+                    </tr>
+                  <?php endforeach; ?>
+                </tbody>
+              </table>
+            </div>
+          <?php else: ?>
+            <div class="alert alert-info mb-0">No years available for the selected range.</div>
+          <?php endif; ?>
+        <?php else: ?>
+          <?php if (!empty($heatmapYears)): ?>
+            <div class="table-responsive">
+              <table class="heatmap-table">
+                <thead>
+                  <tr>
+                    <th scope="col">Metric</th>
+                    <?php foreach ($heatmapYears as $year): ?>
+                      <th scope="col"><?= h((string)$year) ?></th>
+                    <?php endforeach; ?>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <th scope="row">Score</th>
+                    <?php foreach ($heatmapYears as $year):
+                        $periodKey = sprintf('%04d', $year);
+                        $cell = $heatmapMap[$periodKey] ?? null;
+                        $score = $cell['score'] ?? null;
+                        $kCount = $cell['k_count'] ?? 0;
+                        $hasScore = $score !== null;
+                        $cellClass = 'heatmap-cell' . ($hasScore ? ' has-score' : ' is-empty');
+                        $ratio = $hasScore && $heatmapMaxScoreForColor > 0 ? max(0.0, min(1.0, $score / $heatmapMaxScoreForColor)) : 0.0;
+                        [$bgColor, $useLightText] = heatmap_color_for_ratio($ratio);
+                        $textClass = $useLightText ? 'text-white fw-semibold' : '';
+                        $displayScore = $hasScore ? number_format($score, 2, '.', '') : '';
+                        $periodStart = sprintf('%04d-01-01', $year);
+                        $periodEnd = sprintf('%04d-12-31', $year);
+                        $titleParts = [];
+                        if ($hasScore) {
+                            $titleParts[] = 'Score ' . number_format($score, 3, '.', '');
+                        }
+                        $titleParts[] = 'Docs ' . $kCount;
+                        $titleParts[] = 'Click for top articles';
+                        $title = implode(' • ', $titleParts);
+                    ?>
+                      <td class="<?= $cellClass ?> <?= $textClass ?>"
+                          style="background-color: <?= h($bgColor) ?>;"
+                          <?= $hasScore ? 'data-period-key="' . h($periodKey) . '" data-label="' . h((string)$year) . '" data-score="' . h(number_format($score, 4, '.', '')) . '" data-k-count="' . h((string)$kCount) . '" data-period-start="' . h($periodStart) . '" data-period-end="' . h($periodEnd) . '"' : '' ?>
+                          title="<?= h($title) ?>">
+                        <?= $hasScore ? h($displayScore) : '&ndash;' ?>
+                      </td>
+                    <?php endforeach; ?>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          <?php else: ?>
+            <div class="alert alert-info mb-0">No years available for the selected range.</div>
+          <?php endif; ?>
+        <?php endif; ?>
+
+        <?php if ($heatmapHasScores): ?>
+          <div class="mt-3">
+            <div class="heatmap-legend"></div>
+            <div class="heatmap-legend-labels">
+              <span><?= h(number_format($heatmapMinScoreValue ?? 0, 2, '.', '')) ?></span>
+              <span><?= h(number_format($heatmapMaxScoreValue ?? 0, 2, '.', '')) ?></span>
+            </div>
+          </div>
+        <?php endif; ?>
+      <?php elseif ($heatmapComputed): ?>
+        <div class="alert alert-warning mb-0">Heatmap data is unavailable for this query.</div>
+      <?php else: ?>
+        <div class="alert alert-info mb-0">Heatmap has not been generated for this query yet.</div>
+      <?php endif; ?>
+    </div>
+  </section>
+<?php endif; ?>
 
     <?php if ($errorMsg): ?>
       <div class="alert alert-danger" role="alert">
@@ -957,6 +1550,33 @@ if (!empty($results)) {
   </div>
 
   <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+
+  <div class="modal fade" id="heatmapModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-lg modal-dialog-scrollable">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h5 class="modal-title">
+            <i class="fa-solid fa-chart-simple me-2" aria-hidden="true"></i>
+            <span class="js-heatmap-modal-title">Heatmap bucket</span>
+          </h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+        </div>
+        <div class="modal-body">
+          <div class="js-heatmap-modal-loading d-flex align-items-center gap-2 text-body-secondary small mb-3" hidden>
+            <i class="fa-solid fa-spinner fa-spin" aria-hidden="true"></i>
+            <span>Loading…</span>
+          </div>
+          <div class="js-heatmap-modal-error alert alert-danger d-none" role="alert"></div>
+          <ol class="js-heatmap-modal-list list-group list-group-numbered d-none"></ol>
+          <div class="js-heatmap-modal-empty text-body-secondary small d-none">No matching articles were found for this period.</div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Close</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <!-- Markdown Modal -->
   <div class="modal fade" id="mdModal" tabindex="-1" aria-hidden="true">
     <div class="modal-dialog modal-xl modal-dialog-scrollable">
@@ -1147,6 +1767,174 @@ if (!empty($results)) {
             })
             .finally(() => {
                 loadingEl.classList.add('d-none');
+            });
+    });
+})();
+
+(function() {
+    const root = document.getElementById('heatmap-root');
+    if (!root) {
+        return;
+    }
+
+    let config = null;
+    const attr = root.getAttribute('data-config');
+    if (attr) {
+        try {
+            config = JSON.parse(attr);
+        } catch (err) {
+            config = null;
+        }
+    }
+    if (!config || !config.query) {
+        return;
+    }
+
+    const modalEl = document.getElementById('heatmapModal');
+    if (!modalEl) {
+        return;
+    }
+
+    const modal = new bootstrap.Modal(modalEl);
+    const titleEl = modalEl.querySelector('.js-heatmap-modal-title');
+    const listEl = modalEl.querySelector('.js-heatmap-modal-list');
+    const loadingEl = modalEl.querySelector('.js-heatmap-modal-loading');
+    const errorEl = modalEl.querySelector('.js-heatmap-modal-error');
+    const emptyEl = modalEl.querySelector('.js-heatmap-modal-empty');
+
+    const escapeHtml = (value) => {
+        return String(value ?? '')
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#039;');
+    };
+
+    const showLoading = () => {
+        if (loadingEl) {
+            loadingEl.hidden = false;
+            loadingEl.classList.remove('d-none');
+        }
+        if (errorEl) {
+            errorEl.textContent = '';
+            errorEl.classList.add('d-none');
+        }
+        if (emptyEl) {
+            emptyEl.classList.add('d-none');
+        }
+        if (listEl) {
+            listEl.innerHTML = '';
+            listEl.classList.add('d-none');
+        }
+    };
+
+    const hideLoading = () => {
+        if (loadingEl) {
+            loadingEl.hidden = true;
+            loadingEl.classList.add('d-none');
+        }
+    };
+
+    document.addEventListener('click', function(evt) {
+        const cell = evt.target.closest('.heatmap-cell.has-score');
+        if (!cell || !root.contains(cell)) {
+            return;
+        }
+
+        evt.preventDefault();
+
+        const periodKey = cell.getAttribute('data-period-key');
+        if (!periodKey) {
+            return;
+        }
+
+        const label = cell.getAttribute('data-label') || periodKey;
+        const scoreAttr = cell.getAttribute('data-score');
+        const kAttr = cell.getAttribute('data-k-count');
+        const suffix = [];
+        const scoreNum = scoreAttr ? Number(scoreAttr) : NaN;
+        if (!Number.isNaN(scoreNum)) {
+            suffix.push('score ' + scoreNum.toFixed(3));
+        }
+        const kNum = kAttr ? Number(kAttr) : NaN;
+        if (!Number.isNaN(kNum)) {
+            suffix.push('docs ' + kNum);
+        }
+        if (titleEl) {
+            titleEl.textContent = suffix.length ? label + ' (' + suffix.join(' • ') + ')' : label;
+        }
+
+        showLoading();
+        modal.show();
+
+        const body = new URLSearchParams();
+        body.set('q', config.query);
+        body.set('period_key', periodKey);
+        body.set('granularity', config.granularity || 'month');
+        if (config.range_from) {
+            body.set('range_from', config.range_from);
+        }
+        if (config.range_to) {
+            body.set('range_to', config.range_to);
+        }
+        body.set('k', String(config.k || 3));
+
+        fetch('index2.php?action=heatmap_bucket', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8'},
+            body: body.toString()
+        })
+            .then(res => {
+                if (!res.ok) {
+                    throw new Error('HTTP ' + res.status);
+                }
+                return res.json();
+            })
+            .then(data => {
+                hideLoading();
+                if (!data || data.ok !== true || !Array.isArray(data.items)) {
+                    const errMsg = data && data.error ? data.error : 'Unexpected response';
+                    throw new Error(errMsg);
+                }
+
+                const items = data.items;
+                if (!items.length) {
+                    if (emptyEl) {
+                        emptyEl.classList.remove('d-none');
+                    }
+                    return;
+                }
+
+                if (!listEl) {
+                    return;
+                }
+
+                const fragment = document.createDocumentFragment();
+                items.forEach(item => {
+                    const li = document.createElement('li');
+                    li.className = 'list-group-item';
+                    const title = escapeHtml(item.title || 'Untitled document');
+                    const meta = [];
+                    if (item.pubname) meta.push(item.pubname);
+                    if (item.date) meta.push(item.date);
+                    if (typeof item.score === 'number') meta.push('score ' + item.score.toFixed(3));
+                    const summary = escapeHtml(item.summary || '');
+                    li.innerHTML = '<div class="fw-semibold">' + title + '</div>' +
+                        '<div class="text-body-secondary small mb-2">' + escapeHtml(meta.join(' • ')) + '</div>' +
+                        '<div class="text-body-secondary small">' + summary + '</div>';
+                    fragment.appendChild(li);
+                });
+                listEl.innerHTML = '';
+                listEl.appendChild(fragment);
+                listEl.classList.remove('d-none');
+            })
+            .catch(err => {
+                hideLoading();
+                if (errorEl) {
+                    errorEl.textContent = err.message;
+                    errorEl.classList.remove('d-none');
+                }
             });
     });
 })();
