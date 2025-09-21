@@ -31,6 +31,18 @@ CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA public;
 COMMENT ON EXTENSION vector IS 'vector data type and ivfflat and hnsw access methods';
 
 
+--
+-- Name: period_type; Type: TYPE; Schema: public; Owner: journal_user
+--
+
+CREATE TYPE public.period_type AS ENUM (
+    'month',
+    'year'
+);
+
+
+ALTER TYPE public.period_type OWNER TO journal_user;
+
 SET default_tablespace = '';
 
 SET default_table_access_method = heap;
@@ -153,6 +165,54 @@ ALTER SEQUENCE public.pages_page_id_seq OWNED BY public.pages.page_id;
 
 
 --
+-- Name: period_embeddings; Type: TABLE; Schema: public; Owner: journal_user
+--
+
+CREATE TABLE public.period_embeddings (
+    id bigint NOT NULL,
+    period public.period_type NOT NULL,
+    period_key text NOT NULL,
+    period_start date NOT NULL,
+    period_end date NOT NULL,
+    pubname text,
+    is_combined boolean DEFAULT false NOT NULL,
+    model text NOT NULL,
+    dim integer NOT NULL,
+    agg_method text NOT NULL,
+    article_count integer NOT NULL,
+    token_count bigint NOT NULL,
+    embedding public.vector(3072) NOT NULL,
+    embedding_hv public.halfvec(3072) GENERATED ALWAYS AS ((embedding)::public.halfvec(3072)) STORED,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT chk_pub_or_combined CHECK ((((is_combined = true) AND (pubname IS NULL)) OR ((is_combined = false) AND (pubname IS NOT NULL))))
+);
+
+
+ALTER TABLE public.period_embeddings OWNER TO journal_user;
+
+--
+-- Name: period_embeddings_id_seq; Type: SEQUENCE; Schema: public; Owner: journal_user
+--
+
+CREATE SEQUENCE public.period_embeddings_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+ALTER SEQUENCE public.period_embeddings_id_seq OWNER TO journal_user;
+
+--
+-- Name: period_embeddings_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: journal_user
+--
+
+ALTER SEQUENCE public.period_embeddings_id_seq OWNED BY public.period_embeddings.id;
+
+
+--
 -- Name: query_cache; Type: TABLE; Schema: public; Owner: journal_user
 --
 
@@ -200,6 +260,13 @@ ALTER TABLE ONLY public.pages ALTER COLUMN page_id SET DEFAULT nextval('public.p
 
 
 --
+-- Name: period_embeddings id; Type: DEFAULT; Schema: public; Owner: journal_user
+--
+
+ALTER TABLE ONLY public.period_embeddings ALTER COLUMN id SET DEFAULT nextval('public.period_embeddings_id_seq'::regclass);
+
+
+--
 -- Name: docs docs_pkey; Type: CONSTRAINT; Schema: public; Owner: journal_user
 --
 
@@ -237,6 +304,14 @@ ALTER TABLE ONLY public.pages
 
 ALTER TABLE ONLY public.pages
     ADD CONSTRAINT pages_pkey PRIMARY KEY (page_id);
+
+
+--
+-- Name: period_embeddings period_embeddings_pkey; Type: CONSTRAINT; Schema: public; Owner: journal_user
+--
+
+ALTER TABLE ONLY public.period_embeddings
+    ADD CONSTRAINT period_embeddings_pkey PRIMARY KEY (id);
 
 
 --
@@ -288,6 +363,20 @@ CREATE INDEX pages_issue_page_idx ON public.pages USING btree (issue, page);
 --
 
 CREATE INDEX topic_labels_emb_hnsw_hv ON public.topic_labels USING hnsw (emb_hv public.halfvec_cosine_ops);
+
+
+--
+-- Name: ux_period_combined; Type: INDEX; Schema: public; Owner: journal_user
+--
+
+CREATE UNIQUE INDEX ux_period_combined ON public.period_embeddings USING btree (period, period_key) WHERE ((is_combined = true) AND (pubname IS NULL));
+
+
+--
+-- Name: ux_period_per_pub; Type: INDEX; Schema: public; Owner: journal_user
+--
+
+CREATE UNIQUE INDEX ux_period_per_pub ON public.period_embeddings USING btree (period, period_key, pubname) WHERE ((is_combined = false) AND (pubname IS NOT NULL));
 
 
 --
