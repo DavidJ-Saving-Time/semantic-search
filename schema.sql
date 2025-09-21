@@ -338,6 +338,27 @@ CREATE INDEX docs_date_page_id_idx ON public.docs USING btree (date, page, id);
 
 
 --
+-- Name: docs_date_idx; Type: INDEX; Schema: public; Owner: journal_user
+--
+
+CREATE INDEX IF NOT EXISTS docs_date_idx ON public.docs USING btree (date);
+
+
+--
+-- Name: docs_year_month_idx; Type: INDEX; Schema: public; Owner: journal_user
+--
+
+CREATE INDEX IF NOT EXISTS docs_year_month_idx ON public.docs USING btree (date_trunc('month', date));
+
+
+--
+-- Name: docs_pub_date_idx; Type: INDEX; Schema: public; Owner: journal_user
+--
+
+CREATE INDEX IF NOT EXISTS docs_pub_date_idx ON public.docs USING btree (pubname, date);
+
+
+--
 -- Name: docs_embedding_hnsw_hv; Type: INDEX; Schema: public; Owner: journal_user
 --
 
