@@ -352,6 +352,72 @@ if ($defaultStartYear > $defaultEndYear) {
                     <div id="detailContent" class="text-muted">Click a point in the chart to inspect its metadata.</div>
                 </div>
             </div>
+            <div class="card shadow-sm mt-3">
+                <div class="card-body">
+                    <h3 class="h6 mb-3">Click-to-confirm helpers</h3>
+                    <p class="small text-muted">Drop these snippets into a SQL client to jump from the visualization to the underlying records.</p>
+                    <div class="mb-4">
+                        <h4 class="h6">A) Inspect a month&rsquo;s nearest articles</h4>
+                        <p class="small text-muted">Swap <code>:key</code> for a <code>period_key</code> such as <code>&#039;1851-05&#039;</code>.</p>
+                    <pre class="bg-light p-3 small overflow-auto"><code>WITH m AS (
+  SELECT embedding_hv FROM public.period_embeddings
+  WHERE period = 'month' AND is_combined = TRUE AND period_key = :key
+)
+SELECT id, pubname, date, summary, (1 - d.embedding_hv &lt;=&gt; m.embedding_hv) AS sim
+FROM public.docs d, m
+WHERE date &gt;= to_date(:key || '-01', 'YYYY-MM-DD')
+  AND date &lt;  (to_date(:key || '-01', 'YYYY-MM-DD') + INTERVAL '1 month')
+ORDER BY d.embedding_hv &lt;=&gt; m.embedding_hv
+LIMIT 10;</code></pre>
+                    </div>
+                    <div class="mb-4">
+                        <h4 class="h6">B) Auto-label a month with curated topics</h4>
+                    <pre class="bg-light p-3 small overflow-auto"><code>WITH m AS (
+  SELECT embedding_hv FROM public.period_embeddings
+  WHERE period = 'month' AND is_combined = TRUE AND period_key = :key
+)
+SELECT topic
+FROM public.topic_labels t, m
+ORDER BY t.emb &lt;=&gt; m.embedding_hv
+LIMIT 5;</code></pre>
+                    </div>
+                    <div class="mb-4">
+                        <h4 class="h6">C) Spot big month-to-month jumps</h4>
+                    <pre class="bg-light p-3 small overflow-auto"><code>WITH months AS (
+  SELECT period_key,
+         to_date(period_key || '-01', 'YYYY-MM-DD') AS d,
+         embedding_hv
+  FROM public.period_embeddings
+  WHERE period = 'month' AND is_combined = TRUE
+    AND period_key BETWEEN '1850-01' AND '1859-12'
+),
+seq AS (
+  SELECT *, LAG(embedding_hv) OVER (ORDER BY d) AS prev_hv
+  FROM months
+)
+SELECT period_key,
+       (prev_hv &lt;=&gt; embedding_hv) AS dist_to_prev
+FROM seq
+WHERE prev_hv IS NOT NULL
+ORDER BY d;</code></pre>
+                        <p class="small text-muted mb-0">Highest cosine distances often mark regime changes (for example, <code>1854-03/04</code> or <code>1857-05/06</code>).</p>
+                    </div>
+                    <h3 class="h6 mb-2">UMAP tuning tips</h3>
+                    <ul class="small">
+                        <li>Use <code>metric='cosine'</code> and <code>init='pca'</code>.</li>
+                        <li>Try neighbors at 10, 20, 30 and min distances at 0.05, 0.15, 0.4.</li>
+                        <li>If clusters look blobby, lower <code>min_dist</code>; if fragmented, raise it.</li>
+                        <li>Set a <code>random_state</code> for reproducible layouts.</li>
+                        <li>(Optional) Run PCA down to 50 components before UMAP to reduce noise.</li>
+                    </ul>
+                    <h3 class="h6 mb-2">Make it tell a story</h3>
+                    <ul class="small mb-0">
+                        <li>Draw a faint line through months in chronological order to highlight big jumps.</li>
+                        <li>Add a toggle to color by cluster (e.g., KMeans on the original vectors or their PCA-50 reduction).</li>
+                        <li>On hover, surface the top three nearest topics (query B) and a few representative articles (query A).</li>
+                    </ul>
+                </div>
+            </div>
         </div>
     </div>
 </div>
